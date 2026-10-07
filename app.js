@@ -402,7 +402,7 @@ function resRow(p) {
 let soloRevisar = false;
 function viewPacientes() {
   const nRev = S.patients.filter(porRevisar).length;
-  view().innerHTML = vhead('Pacientes', `${S.patients.length} registrados`, `${S.patients.length ? '' : `<label class="btn onglass" style="cursor:pointer">${IC.up} Importar pacientes<input type="file" accept="application/json,.json" id="impP" hidden></label>`}<button class="btn white" id="np">${IC.plus} Paciente nuevo</button>`) + `
+  view().innerHTML = vhead('Pacientes', `${S.patients.length} registrados`, `${S.patients.length ? '' : `<label class="btn onglass" style="cursor:pointer">${IC.up} Importar pacientes<input type="file" id="impP" hidden></label>`}<button class="btn white" id="np">${IC.plus} Paciente nuevo</button>`) + `
   <section class="card milk">
     <div class="row wrap" style="gap:12px"><div class="searchbox" style="flex:1;min-width:240px">${IC.search}<input id="pq" type="search" placeholder="Filtrar por nombre o expediente" autocomplete="off"></div>
     ${nRev ? `<button class="chip ${soloRevisar ? 'on' : ''}" id="rev">Por revisar (${nRev})</button>` : ''}</div>
@@ -418,7 +418,7 @@ function viewPacientes() {
   };
   $('#pq').addEventListener('input', draw); draw();
   $('#rev') && ($('#rev').onclick = () => { soloRevisar = !soloRevisar; viewPacientes(); });
-  $('#impP') && ($('#impP').onchange = e => importPacientes(e.target.files[0]));
+  $('#impP') && ($('#impP').onchange = e => { const f = e.target.files[0]; e.target.value = ''; importarArchivo(f); });
 }
 
 /* =========================================================================
@@ -940,20 +940,20 @@ function viewAjustes() {
   <section class="card milk"><h2 style="margin-bottom:6px">Seguridad</h2><p class="hint" style="margin-bottom:14px">Un PIN de 4 dígitos protege los expedientes si alguien más toma el iPad. Se pide al abrir y tras 5 minutos fuera de la app.</p>
     <div class="row wrap">${st.pinHash ? `<button class="btn soft" id="pinSet">${IC.lock} Cambiar PIN</button><button class="btn ghost" id="pinOff">Quitar PIN</button><button class="btn primary" id="lockNow">${IC.lock} Bloquear ahora</button>` : `<button class="btn primary" id="pinSet">${IC.lock} Crear PIN</button>`}</div></section>
 
-  <section class="card milk"><h2 style="margin-bottom:6px">Importar pacientes</h2><p class="hint" style="margin-bottom:14px">Agrega pacientes desde un archivo de pacientes (.json). No borra nada: los que ya existen solo se completan.</p>
-    <label class="btn primary" style="cursor:pointer">${IC.up} Elegir archivo de pacientes<input type="file" accept="application/json,.json" id="impP2" hidden></label></section>
+  <section class="card milk"><h2 style="margin-bottom:6px">Importar pacientes</h2><p class="hint" style="margin-bottom:14px">Agrega pacientes desde un archivo de pacientes (.json). No borra nada: los que ya existen solo se completan. Si eliges un respaldo por error, la app lo detecta y te pregunta.</p>
+    <label class="btn primary" style="cursor:pointer">${IC.up} Elegir archivo de pacientes<input type="file" id="impP2" hidden></label></section>
 
   <section class="card milk"><h2 style="margin-bottom:6px">Respaldo</h2><p class="hint" style="margin-bottom:14px">Todo se guarda solo en este iPad. Guarda un respaldo en Archivos o iCloud Drive cada semana. ${st.lastBackup ? `Último respaldo: ${fmtLong(st.lastBackup.slice(0, 10))}.` : 'Aún no has hecho ningún respaldo.'}</p>
     <div class="row wrap"><button class="btn primary" id="bk">${IC.down} Guardar respaldo</button>
-      <label class="btn soft" style="cursor:pointer">${IC.up} Restaurar respaldo<input type="file" accept="application/json,.json" id="restore" hidden></label></div>
+      <label class="btn soft" style="cursor:pointer">${IC.up} Restaurar respaldo<input type="file" id="restore" hidden></label></div>
     <p class="hint" id="persist" style="margin-top:10px"></p></section>
   </div>`;
   bindForm(view(), st, () => save());
   $('#logo').onchange = e => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { st.logo = rd.result; save(); viewAjustes(); }; rd.readAsDataURL(f); };
   $('#nologo') && ($('#nologo').onclick = () => { st.logo = ''; save(); viewAjustes(); });
   $('#bk').onclick = exportBackup;
-  $('#restore').onchange = e => importBackup(e.target.files[0]);
-  $('#impP2').onchange = e => importPacientes(e.target.files[0]);
+  $('#restore').onchange = e => { const f = e.target.files[0]; e.target.value = ''; importarArchivo(f); };
+  $('#impP2').onchange = e => { const f = e.target.files[0]; e.target.value = ''; importarArchivo(f); };
   $('#pinSet').onclick = setPin;
   $('#pinOff') && ($('#pinOff').onclick = async () => { if (await confirmBox('La app ya no pedirá PIN al abrirse.', { ok: 'Quitar PIN' })) { st.pinHash = ''; save(); viewAjustes(); toast('PIN quitado'); } });
   $('#lockNow') && ($('#lockNow').onclick = showLock);
@@ -1329,48 +1329,62 @@ async function exportBackup() {
   await deliver(blob, `Respaldo_consultorio_${iso(new Date())}.json`);
   render();
 }
-async function importPacientes(file) {
-  if (!file) return;
-  try {
-    const data = JSON.parse(await file.text());
-    if (Array.isArray(data.patients) && data.settings) throw new Error('Ese archivo es un respaldo completo; úsalo en Ajustes → Restaurar respaldo.');
-    if (data.formato !== 'consultorio-issste/pacientes' || !Array.isArray(data.pacientes)) throw new Error('El archivo no es un archivo de pacientes de esta app.');
-    const base = e => norm(e).split('/')[0];
-    let nuevos = 0, completados = 0;
-    const plan = data.pacientes.map(x => {
-      const ex = S.patients.find(p => norm(p.nombre) === norm(x.nombre) && (!p.expediente || !x.expediente || base(p.expediente) === base(x.expediente)));
-      ex ? completados++ : nuevos++; return [x, ex];
-    });
-    if (!await confirmBox(`Se agregarán ${nuevos} pacientes nuevos y se completarán ${completados} que ya existen. No se borra nada.`, { ok: 'Importar', title: 'Importar pacientes' })) return;
-    plan.forEach(([x, ex]) => {
-      const tipo = (x.tipo === '' || x.tipo === null || x.tipo === undefined) ? '' : Number(x.tipo);
-      if (ex) {
-        if (!ex.expediente && x.expediente) ex.expediente = x.expediente;
-        if ((ex.tipo === '' || ex.tipo === undefined) && tipo !== '') ex.tipo = tipo;
-        if (!ex.sexo && x.sexo) ex.sexo = x.sexo;
-        if (!ex.fnac && x.fnac) { ex.fnac = x.fnac; ex.fnacAprox = !!x.fnacAprox; }
-        if (x.origen && !ex.origen) ex.origen = x.origen;
-      } else {
-        S.patients.push({ id: uid(), nombre: x.nombre, expediente: x.expediente || '', fnac: x.fnac || '', fnacAprox: !!x.fnacAprox, sexo: x.sexo || '', tipo,
-          tel: '', domicilio: '', antecedentes: {}, origen: x.origen || null, createdAt: new Date().toISOString() });
-      }
-    });
-    if (Array.isArray(data.diagnosticos)) {
-      const m = new Map((S.dxPrevios || []).map(d => [norm(d.label), d]));
-      data.diagnosticos.forEach(d => { const k = norm(d.label); if (m.has(k)) m.get(k).n = Math.max(m.get(k).n, d.n); else m.set(k, { label: d.label, n: d.n }); });
-      S.dxPrevios = [...m.values()];
-    }
-    await save(true); toast(`Listo: ${nuevos} nuevos, ${completados} completados`); soloRevisar = false; go('#/pacientes');
-  } catch (e) { toast(e.message); }
+/* --------- importar: un solo flujo que reconoce el tipo de archivo --------- */
+function avisoBox(title, msg) {
+  const sh = openSheet(`<div class="shead"><h2>${esc(title)}</h2></div><p>${esc(msg)}</p>
+    <div class="row" style="justify-content:flex-end;margin-top:18px"><button class="btn primary" data-ok>Entendido</button></div>`, { small: true });
+  $('[data-ok]', sh).onclick = closeSheet;
 }
-async function importBackup(file) {
+async function leerArchivo(file) {
+  let txt = await file.text();
+  txt = txt.replace(/^\uFEFF/, '').trim();
+  let data;
+  try { data = JSON.parse(txt); }
+  catch (e) { throw new Error(`«${file.name}» no se pudo leer como archivo de la app. Asegúrate de elegir el archivo .json original (sin abrirlo ni editarlo antes).`); }
+  if (data && data.formato === 'consultorio-issste/pacientes' && Array.isArray(data.pacientes)) return { tipo: 'pacientes', data };
+  if (data && Array.isArray(data.patients) && Array.isArray(data.consultas) && data.settings) return { tipo: 'respaldo', data };
+  throw new Error(`«${file.name}» no es un respaldo ni un archivo de pacientes de esta app.`);
+}
+async function importarArchivo(file) {
   if (!file) return;
   try {
-    const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.patients) || !Array.isArray(data.consultas) || !data.settings) throw new Error('El archivo no es un respaldo de esta app.');
-    if (!await confirmBox(`El respaldo tiene ${data.patients.length} pacientes y ${data.consultas.length} consultas. Reemplazará todo lo que hay ahora en este iPad.`, { ok: 'Restaurar', danger: true, title: 'Restaurar respaldo' })) return;
-    S = migrate(data); await save(true); toast('Respaldo restaurado'); go('#/hoy');
-  } catch (e) { toast(e.message); }
+    const { tipo, data } = await leerArchivo(file);
+    if (tipo === 'pacientes') await aplicarPacientes(data); else await aplicarRespaldo(data);
+  } catch (e) { console.error(e); avisoBox('No se pudo abrir el archivo', e.message); }
+}
+const importPacientes = importarArchivo, importBackup = importarArchivo;
+
+async function aplicarPacientes(data) {
+  const base = e => norm(e).split('/')[0];
+  let nuevos = 0, completados = 0;
+  const plan = data.pacientes.map(x => {
+    const ex = S.patients.find(p => norm(p.nombre) === norm(x.nombre) && (!p.expediente || !x.expediente || base(p.expediente) === base(x.expediente)));
+    ex ? completados++ : nuevos++; return [x, ex];
+  });
+  if (!await confirmBox(`Es un archivo de pacientes. Se agregarán ${nuevos} pacientes nuevos y se completarán ${completados} que ya existen. No se borra nada.`, { ok: 'Importar', title: 'Importar pacientes' })) return;
+  plan.forEach(([x, ex]) => {
+    const tipo = (x.tipo === '' || x.tipo === null || x.tipo === undefined) ? '' : Number(x.tipo);
+    if (ex) {
+      if (!ex.expediente && x.expediente) ex.expediente = x.expediente;
+      if ((ex.tipo === '' || ex.tipo === undefined) && tipo !== '') ex.tipo = tipo;
+      if (!ex.sexo && x.sexo) ex.sexo = x.sexo;
+      if (!ex.fnac && x.fnac) { ex.fnac = x.fnac; ex.fnacAprox = !!x.fnacAprox; }
+      if (x.origen && !ex.origen) ex.origen = x.origen;
+    } else {
+      S.patients.push({ id: uid(), nombre: x.nombre, expediente: x.expediente || '', fnac: x.fnac || '', fnacAprox: !!x.fnacAprox, sexo: x.sexo || '', tipo,
+        tel: '', domicilio: '', antecedentes: {}, origen: x.origen || null, createdAt: new Date().toISOString() });
+    }
+  });
+  if (Array.isArray(data.diagnosticos)) {
+    const m = new Map((S.dxPrevios || []).map(d => [norm(d.label), d]));
+    data.diagnosticos.forEach(d => { const k = norm(d.label); if (m.has(k)) m.get(k).n = Math.max(m.get(k).n, d.n); else m.set(k, { label: d.label, n: d.n }); });
+    S.dxPrevios = [...m.values()];
+  }
+  await save(true); toast(`Listo: ${nuevos} nuevos, ${completados} completados`); soloRevisar = false; go('#/pacientes');
+}
+async function aplicarRespaldo(data) {
+  if (!await confirmBox(`Es un respaldo completo con ${data.patients.length} pacientes y ${data.consultas.length} consultas. Reemplazará todo lo que hay ahora en este iPad.`, { ok: 'Restaurar', danger: true, title: 'Restaurar respaldo' })) return;
+  S = migrate(data); await save(true); toast('Respaldo restaurado'); go('#/hoy');
 }
 
 /* =========================================================================

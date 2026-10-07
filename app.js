@@ -98,7 +98,7 @@ function defaults() {
       unidadReceptora: 'HOSPITAL GENERAL ISSSTE GUANAJUATO', claveReceptora: '',
       motivo: 'NO CONTAMOS CON EL SERVICIO', servicio: 'MEDICINA INTERNA',
       decada: 'estandar', exploracionNormal: EXPLORACION_NORMAL,
-      tipos: Array(10).fill(''), pinHash: '', logo: '', lastBackup: ''
+      tipos: Array(10).fill(''), pinHash: '', logo: '', lastBackup: '', saludo: 'Dra. Nancy'
     },
     patients: [], consultas: [], referencias: [],
     suive: (window.SUIVE_BASE || []).map(([clave, nombre, grupo]) => ({ id: uid(), clave, nombre, grupo, fav: false, activo: true }))
@@ -140,6 +140,7 @@ const IC = {
   lock: I('<rect x="4" y="11" width="16" height="10" rx="3"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
   down: I('<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>'),
   up: I('<path d="M12 21V9M7 14l5-5 5 5M5 3h14"/>'),
+  refresh: I('<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>'),
   steth: I('<path d="M6 3v6a6 6 0 0 0 12 0V3"/><path d="M12 15v2a4 4 0 0 0 8 0v-2"/><circle cx="20" cy="13" r="2"/>')
 };
 
@@ -327,6 +328,7 @@ const vhead = (title, sub = '', acts = '') => `<div class="vhead"><div><h1>${tit
 /* =========================================================================
    VISTA: HOY
    ========================================================================= */
+let fraseExtra = 0;   // «Otra frase» avanza solo durante esta sesión; cada día empieza con la frase del día
 function viewHoy() {
   const now = new Date(), t = iso(now), ep = epiWeek(now), r = epiRange(ep.year, ep.week);
   const hoy = S.consultas.filter(c => c.fecha === t).sort((a, b) => a.hora.localeCompare(b.hora));
@@ -334,7 +336,15 @@ function viewHoy() {
   const mes = S.consultas.filter(c => c.fecha.startsWith(t.slice(0, 7))).length;
   const pct = Math.round(ep.week / weeksInYear(ep.year) * 100);
   const needBackup = S.patients.length && (!S.settings.lastBackup || (now - new Date(S.settings.lastBackup)) > 7 * 864e5);
+  const frases = window.FRASES || [];
+  const diaDelAnio = Math.floor((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - new Date(now.getFullYear(), 0, 0)) / 864e5);
+  const fraseDe = k => frases.length ? frases[((diaDelAnio + now.getFullYear() * 7 + k) % frases.length + frases.length) % frases.length] : '';
   view().innerHTML = `
+  <section class="greet">
+    <h1 class="hola">Hola, ${esc(S.settings.saludo || 'Dra. Nancy')}</h1>
+    ${frases.length ? `<div class="frase glass"><span class="comilla" aria-hidden="true">“</span><p id="frase">${esc(fraseDe(fraseExtra))}</p>
+      <button class="iconbtn" id="otraFrase" aria-label="Ver otra frase" title="Otra frase">${IC.refresh}</button></div>` : ''}
+  </section>
   <section class="hero">
     <div class="today glass">
       <div><div class="dow">${cap(DIAS[now.getDay()])}</div>
@@ -370,6 +380,9 @@ function viewHoy() {
         </div>`; }).join('') : `<div class="empty"><b>Aún no hay consultas hoy</b>Busca al paciente a la izquierda para registrar la primera.</div>`}
     </section>
   </div>`;
+  $('#otraFrase') && ($('#otraFrase').onclick = () => {
+    fraseExtra++; const el = $('#frase'); el.classList.remove('nueva'); void el.offsetWidth; el.textContent = fraseDe(fraseExtra); el.classList.add('nueva');
+  });
   $('#goEpi').onclick = () => { R.tab = 'epi'; R.epiY = ep.year; R.epiW = ep.week; go('#/reportes'); };
   $('#nuevoPac').onclick = () => openPacienteForm({ thenConsulta: true });
   $('#bk') && ($('#bk').onclick = exportBackup);
@@ -748,7 +761,8 @@ function viewReferencia({ a: id }) {
         <div class="f s6"><label>Licencia médica desde</label><input type="date" data-b="licDesde"></div>
         <div class="f s6"><label>Licencia médica hasta</label><input type="date" data-b="licHasta"></div>
         <div class="f"><span class="lbl">Referencia por</span><div class="seg" data-seg="riesgo"><button data-v="">Ninguno</button><button data-v="probable">Probable riesgo de trabajo</button><button data-v="riesgo">Riesgo de trabajo</button></div></div>
-        <div class="f s6"><label>Médico tratante</label><input type="text" data-b="medico"></div>
+        <div class="f s6"><label>Nombre para el saludo de «Hoy»</label><input type="text" data-b="saludo" placeholder="Dra. Nancy"></div>
+      <div class="f s6"><label>Médico tratante</label><input type="text" data-b="medico"></div>
         <div class="f s6"><label>Cédula profesional</label><input type="text" data-b="cedula"></div>
         <div class="f s6"><label>Vo. Bo. jefe inmediato</label><input type="text" data-b="jefe"></div>
         <div class="f s6"><label>Director o responsable</label><input type="text" data-b="director"></div>
@@ -912,6 +926,7 @@ function viewAjustes() {
   <div class="stack">
   <section class="card milk"><h2 style="margin-bottom:6px">Datos para la solicitud de referencia</h2><p class="hint" style="margin-bottom:14px">Se copian a cada solicitud nueva. Puedes cambiarlos en cada solicitud sin afectar estos.</p>
     <div class="form">
+      <div class="f s6"><label>Nombre para el saludo de «Hoy»</label><input type="text" data-b="saludo" placeholder="Dra. Nancy"></div>
       <div class="f s6"><label>Médico tratante</label><input type="text" data-b="medico"></div>
       <div class="f s6"><label>Cédula profesional</label><input type="text" data-b="cedula"></div>
       <div class="f s6"><label>Vo. Bo. jefe inmediato</label><input type="text" data-b="jefe"></div>

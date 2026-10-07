@@ -76,6 +76,16 @@ h3{font-size:17px}
 .vhead h1{font-size:34px;font-weight:500}
 .vhead p{margin:4px 0 0;color:rgba(255,255,255,.82)}
 
+/* ---------- Saludo y frase del día ---------- */
+.greet{margin:2px 0 20px;color:var(--white)}
+.greet .hola{font-size:clamp(32px,4.4vw,46px);font-weight:500;letter-spacing:-.02em;margin:0 4px 12px}
+.frase{display:flex;align-items:center;gap:14px;border-radius:var(--r-lg);padding:14px 16px 14px 20px}
+.frase .comilla{font-size:64px;line-height:.6;color:var(--ocaso);font-weight:600;align-self:flex-start;margin-top:14px;text-shadow:0 2px 12px rgba(0,229,229,.45)}
+.frase p{margin:0;flex:1;font-size:clamp(17px,1.9vw,21px);line-height:1.45;font-weight:500;max-width:72ch}
+.frase .iconbtn{background:rgba(255,255,255,.2);color:#fff;flex:none}
+.frase p.nueva{animation:fade .45s ease}
+@media (prefers-reduced-motion:reduce){.frase p.nueva{animation:none}}
+
 /* ---------- Hero del tablero ---------- */
 .hero{display:grid;grid-template-columns:1fr auto;gap:20px;align-items:stretch;margin-bottom:20px}
 .hero .today{border-radius:var(--r-xl);padding:26px 30px;display:flex;flex-direction:column;justify-content:space-between;min-height:220px}

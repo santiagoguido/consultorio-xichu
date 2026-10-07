@@ -636,6 +636,8 @@ function viewPaciente({ a: id, b: tab = 'consultas' }) {
 /* =========================================================================
    SOLICITUD DE REFERENCIA
    ========================================================================= */
+const dxDelPaciente = pid => [...new Set(consultasDe(pid).map(c => (c.dxIssste || '').trim()).filter(Boolean))];
+const ultimoDx = pid => dxDelPaciente(pid)[0] || '';
 function nuevaReferencia(pid) {
   const p = pat(pid), st = S.settings, cs = consultasDe(pid), now = new Date();
   const last = cs[0], lastNota = cs.find(c => (c.nota || '').trim()), lastEx = cs.find(c => (c.exploracion || '').trim()),
@@ -648,7 +650,7 @@ function nuevaReferencia(pid) {
     unidadReceptora: st.unidadReceptora, claveReceptora: st.claveReceptora,
     refiereA: 'consulta', traslados: '', servicio: st.servicio, tipo: 'primera',
     cita: { fecha: '', hora: '' },
-    presentacion: '', idx: last?.dxIssste ? 'Pb ' + last.dxIssste : '', resultados: 'Se anexan.',
+    presentacion: '', idx: ultimoDx(pid), resultados: 'Se anexan.',
     licDesde: '', licHasta: '', riesgo: '',
     medico: st.medico, cedula: st.cedula, jefe: st.jefe, director: st.director, directorCargo: st.directorCargo,
     gen: {
@@ -740,7 +742,8 @@ function viewReferencia({ a: id }) {
         <div class="f s3"><label>Fecha de cita</label><input type="date" data-b="cita.fecha"></div>
         <div class="f s3"><label>Hora de cita</label><input type="time" data-b="cita.hora"></div>
         <div class="section"><h3>Cierre</h3></div>
-        <div class="f"><label>Idx (impresión diagnóstica)</label><input type="text" data-b="idx"></div>
+        <div class="f"><div class="row between"><label for="idx" class="lbl">Idx (diagnóstico ISSSTE)</label><button type="button" class="btn ghost" id="idxDx">Usar el de la última consulta</button></div>
+          <div class="combo" id="idxCombo"><input id="idx" type="text" data-b="idx" autocomplete="off" placeholder="Diagnóstico ISSSTE"></div></div>
         <div class="f"><label>Resultados de laboratorio y gabinete</label><textarea data-b="resultados" style="min-height:60px"></textarea></div>
         <div class="f s6"><label>Licencia médica desde</label><input type="date" data-b="licDesde"></div>
         <div class="f s6"><label>Licencia médica hasta</label><input type="date" data-b="licHasta"></div>
@@ -777,9 +780,12 @@ function viewReferencia({ a: id }) {
       <button class="btn primary" id="xPdf">${IC.pdf} Exportar PDF</button>
     </div>
   </section>`;
+  if (!(r.idx || '').trim() && ultimoDx(p.id)) { r.idx = ultimoDx(p.id); save(); }
   const count = () => { const w = (r.presentacion || '').trim().split(/\s+/).filter(Boolean).length; $('#pcount').textContent = w ? `${w} palabras` : ''; };
   bindForm(view(), r, k => { save(); if (k === 'presentacion') count(); });
   count();
+  attachList($('#idxCombo'), $('#idx'), q => dxDelPaciente(p.id).filter(d => !norm(q) || norm(d).includes(norm(q))).map(label => ({ label })), it => { r.idx = it.label; $('#idx').value = it.label; save(); });
+  $('#idxDx').onclick = () => { const d = ultimoDx(p.id); if (!d) return toast('Este paciente no tiene diagnóstico ISSSTE registrado'); r.idx = d; $('#idx').value = d; save(); };
   $('#back').onclick = () => go(`#/paciente/${p.id}/referencias`);
   $('#editAnt').onclick = () => go(`#/paciente/${p.id}/antecedentes`);
   $('#exNormal').onclick = () => { const t = $('[data-b="gen.exploracion"]'); t.value = S.settings.exploracionNormal.replace(/@/g, p.sexo === 'F' ? 'a' : 'o'); r.gen.exploracion = t.value; save(); };
@@ -919,7 +925,7 @@ function viewAjustes() {
       <div class="f"><label>Motivo de la referencia por omisión</label><input type="text" data-b="motivo"></div>
       <div class="f"><span class="lbl">Logotipo para el formato (opcional)</span>
         <div class="row wrap">${st.logo ? `<img src="${st.logo}" alt="Logotipo cargado" style="height:56px;border-radius:8px;background:#fff">` : '<span class="small muted">Sin logotipo: se imprime el nombre del Instituto en texto.</span>'}
-        <label class="btn soft" style="cursor:pointer">${IC.up} Elegir imagen<input type="file" accept="image/png,image/jpeg" id="logo" hidden></label>
+        <label class="btn soft" style="cursor:pointer">${IC.up} Elegir imagen<input type="file" accept="image/*" id="logo" hidden></label>
         ${st.logo ? '<button class="btn ghost" id="nologo">Quitar</button>' : ''}</div></div>
     </div></section>
 
@@ -949,7 +955,15 @@ function viewAjustes() {
     <p class="hint" id="persist" style="margin-top:10px"></p></section>
   </div>`;
   bindForm(view(), st, () => save());
-  $('#logo').onchange = e => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { st.logo = rd.result; save(); viewAjustes(); }; rd.readAsDataURL(f); };
+  $('#logo').onchange = e => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = async () => {
+      try { st.logo = (await imagenAPNG(rd.result)).dataUrl; save(); viewAjustes(); toast('Logotipo guardado'); }
+      catch (err) { avisoBox('No se pudo usar la imagen', 'Prueba con una imagen PNG o JPG (por ejemplo, una captura de pantalla del logotipo).'); }
+    };
+    rd.readAsDataURL(f);
+  };
   $('#nologo') && ($('#nologo').onclick = () => { st.logo = ''; save(); viewAjustes(); });
   $('#bk').onclick = exportBackup;
   $('#restore').onchange = e => { const f = e.target.files[0]; e.target.value = ''; importarArchivo(f); };
@@ -990,6 +1004,18 @@ function editSuive(id, after) {
 /* =========================================================================
    EXPORTACIÓN
    ========================================================================= */
+/* imagen → PNG (máx. 800 px de ancho): evita formatos que Word, Pages o el PDF no reconocen */
+async function imagenAPNG(src) {
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('imagen')); i.src = src; });
+  const k = Math.min(1, 800 / img.naturalWidth), cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(img.naturalWidth * k)); cv.height = Math.max(1, Math.round(img.naturalHeight * k));
+  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  const dataUrl = cv.toDataURL('image/png'), bin = atob(dataUrl.split(',')[1]), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return { dataUrl, bytes, w: cv.width, h: cv.height };
+}
+async function logoInfo() { if (!S.settings.logo) return null; try { return await imagenAPNG(S.settings.logo); } catch (e) { console.error(e); return null; } }
+const fitBox = (w, h, bw, bh) => { const k = Math.min(bw / w, bh / h); return [w * k, h * k]; };
 const loaded = {};
 function loadScript(src) {
   return loaded[src] ??= new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => { delete loaded[src]; rej(new Error('No se pudo cargar ' + src)); }; document.head.appendChild(s); });
@@ -1172,7 +1198,8 @@ async function pdfReferencia(r) {
   // Encabezado
   doc.setLineWidth(.6); doc.rect(L + 5, 22, 130, 18); if (r.folio) { B(9); doc.text(r.folio, L + 10, 35); }
   N(10); doc.text('Folio No.', R_ - 10, 50, { align: 'right' });
-  if (st.logo) { try { doc.addImage(st.logo, L + 5, 52, 150, 50, undefined, 'FAST'); } catch (e) { } }
+  const lg = await logoInfo();
+  if (lg) { const [lw, lh] = fitBox(lg.w, lg.h, 150, 50); doc.addImage(lg.dataUrl, 'PNG', L + 5, 52 + (50 - lh) / 2, lw, lh, undefined, 'FAST'); }
   else { B(8); doc.setTextColor(30, 70, 110); doc.text(['Instituto de Seguridad', 'y Servicios Sociales', 'de los Trabajadores', 'del Estado'], L + 8, 64); doc.setTextColor(0, 0, 0); }
   line(L + 5, 106, 210, 106, .4);
   N(8); doc.text('Fecha y hora', 500, 68);
@@ -1226,7 +1253,7 @@ async function pdfReferencia(r) {
   let y0 = 532;
 
   // Idx y resultados
-  B(8); doc.text(`Idx.- ${r.idx || ''}`, L + 15, y0, { maxWidth: 510 });
+  B(8); doc.text(`Idx.- ${r.idx || ultimoDx(r.patientId)}`, L + 15, y0, { maxWidth: 510 });
   line(L, y0 + 4, R_, y0 + 4); B(8); doc.text('Resultados de Laboratorio y Gabinete', L, y0 + 13); line(L, y0 + 16, R_, y0 + 16);
   N(9); doc.text(doc.splitTextToSize(r.resultados || '', 520).slice(0, 2), L + 10, y0 + 27);
   line(L, y0 + 36, R_, y0 + 36);
@@ -1276,11 +1303,10 @@ async function docxReferencia(r) {
   const mark = b => b ? '[ X ]' : '[   ]';
   const ch = [];
   let headLeft;
-  if (st.logo) {
-    try {
-      const bin = atob(st.logo.split(',')[1]); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-      headLeft = [new docx.Paragraph({ children: [new docx.ImageRun({ data: u8, type: st.logo.includes('png') ? 'png' : 'jpg', transformation: { width: 180, height: 60 } })] })];
-    } catch (e) { headLeft = null; }
+  const lg = await logoInfo();
+  if (lg) {
+    const [lw, lh] = fitBox(lg.w, lg.h, 200, 66);
+    headLeft = [new docx.Paragraph({ children: [new docx.ImageRun({ type: 'png', data: lg.bytes, transformation: { width: Math.round(lw), height: Math.round(lh) } })] })];
   }
   headLeft ??= [w.P('Instituto de Seguridad y Servicios Sociales\nde los Trabajadores del Estado', { bold: true, size: 8.5, color: '1E466E' })];
   ch.push(w.T([[w.C(headLeft, { w: 45 }), w.C([w.P(`Folio No. ${r.folio || '________'}`, { align: w.AlignmentType.RIGHT, size: 10 }),
@@ -1304,7 +1330,7 @@ async function docxReferencia(r) {
     { borders: { top: w.NONE, bottom: w.LINE('1A1650'), left: w.NONE, right: w.NONE, insideHorizontal: w.NONE, insideVertical: w.NONE } }));
   ch.push(w.P('PRESENTACIÓN DEL CASO', { bold: true, size: 9, align: w.AlignmentType.CENTER, before: 140, after: 80 }));
   (r.presentacion || '').split('\n').filter(s => s.trim()).forEach(pp => ch.push(w.P(pp.trim(), { bold: true, size: 8.5, align: w.AlignmentType.JUSTIFIED, after: 80 })));
-  ch.push(w.P(`Idx.- ${r.idx || ''}`, { bold: true, size: 9, before: 60, after: 60 }));
+  ch.push(w.P(`Idx.- ${r.idx || ultimoDx(r.patientId)}`, { bold: true, size: 9, before: 60, after: 60 }));
   ch.push(w.T([[w.C('Resultados de Laboratorio y Gabinete', { bold: true, size: 8.5 })], [w.C(r.resultados || '', { size: 9 })]], { borders: { top: w.LINE('1A1650'), bottom: w.LINE('1A1650'), left: w.NONE, right: w.NONE, insideHorizontal: w.LINE('1A1650'), insideVertical: w.NONE } }));
   const fd = s => s ? fmtShort(s) : '__/__/__';
   ch.push(w.P(`Licencia médica otorgada   Desde: ${fd(r.licDesde)}   Hasta: ${fd(r.licHasta)}        Referencia por:  Probable riesgo de trabajo ${mark(r.riesgo === 'probable')}   Riesgo de trabajo ${mark(r.riesgo === 'riesgo')}`, { size: 7.5, before: 80, after: 100 }));

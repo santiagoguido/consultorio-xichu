@@ -309,6 +309,137 @@ function dxItems(q) {
     .sort((a, b) => b.n - a.n).slice(0, 12).map(e => ({ label: e.label }));
 }
 
+
+/* =========================================================================
+   PX CRÓNICO — enfermedades crónico-degenerativas y su tratamiento (nivel paciente)
+   ========================================================================= */
+const CRONICAS = ['Diabetes mellitus tipo 2', 'Diabetes mellitus tipo 1', 'Hipertensión arterial sistémica', 'Dislipidemia', 'Obesidad',
+  'Enfermedad renal crónica', 'Cardiopatía isquémica', 'Insuficiencia cardíaca', 'Enfermedad vascular cerebral (secuelas)', 'EPOC', 'Asma',
+  'Hipotiroidismo', 'Hipertiroidismo', 'Artritis reumatoide', 'Osteoartritis', 'Osteoporosis', 'Hiperuricemia / gota', 'Hiperplasia prostática benigna',
+  'Cirrosis hepática', 'Epilepsia', 'Enfermedad de Parkinson', 'Demencia / Alzheimer', 'Depresión', 'Insuficiencia venosa crónica', 'VIH', 'Cáncer'];
+const MEDS_CRONICOS = ['Metformina 850 mg', 'Metformina 500 mg', 'Glibenclamida 5 mg', 'Metformina/glibenclamida 500/5 mg', 'Sitagliptina 100 mg', 'Dapagliflozina 10 mg',
+  'Empagliflozina 10 mg', 'Insulina NPH', 'Insulina glargina', 'Insulina rápida', 'Telmisartán 40 mg', 'Telmisartán 80 mg', 'Telmisartán/hidroclorotiazida 80/12.5 mg',
+  'Losartán 50 mg', 'Enalapril 10 mg', 'Captopril 25 mg', 'Amlodipino 5 mg', 'Nifedipino 30 mg', 'Hidroclorotiazida 25 mg', 'Clortalidona 25 mg', 'Metoprolol 100 mg',
+  'Propranolol 40 mg', 'Furosemida 40 mg', 'Espironolactona 25 mg', 'Atorvastatina 20 mg', 'Pravastatina 20 mg', 'Bezafibrato 200 mg', 'Ezetimiba 10 mg',
+  'Ácido acetilsalicílico 100 mg', 'Clopidogrel 75 mg', 'Levotiroxina 100 mcg', 'Metimazol 5 mg', 'Salbutamol inhalado', 'Beclometasona inhalada',
+  'Bromuro de ipratropio inhalado', 'Alopurinol 300 mg', 'Tamsulosina 0.4 mg', 'Finasterida 5 mg', 'Levodopa/carbidopa 250/25 mg', 'Ácido valproico 500 mg',
+  'Fenitoína 100 mg', 'Carbamazepina 200 mg', 'Sertralina 50 mg', 'Fluoxetina 20 mg', 'Omeprazol 20 mg', 'Calcio + vitamina D', 'Alendronato 70 mg',
+  'Metotrexato 2.5 mg', 'Prednisona 5 mg', 'Paracetamol 500 mg'];
+
+function mesesDesde(isoStr) {
+  if (!isoStr) return 0;
+  const a = parseISO(isoStr), b = new Date();
+  let m = (b.getFullYear() - a.getFullYear()) * 12 + b.getMonth() - a.getMonth(); if (b.getDate() < a.getDate()) m--;
+  return Math.max(0, m);
+}
+const evolMeses = e => (+e.meses || 0) + mesesDesde(e.registrado);   // el tiempo de evolución avanza solo
+function evolTxt(e) {
+  const t = evolMeses(e), y = Math.floor(t / 12), m = t % 12;
+  const Y = `${y} año${y === 1 ? '' : 's'}`, M = `${m} mes${m === 1 ? '' : 'es'}`;
+  return t < 1 ? 'menos de 1 mes' : y === 0 ? M : m === 0 ? Y : `${Y} y ${M}`;
+}
+const cronActivo = p => !!(p?.cronico?.activo && (p.cronico.enfermedades || []).length);
+
+function cronCardHTML(p, { editar = true } = {}) {
+  const c = p.cronico;
+  return `<div class="croncard">
+    <div class="row between wrap"><div class="row" style="gap:10px"><span class="cronbadge">Px crónico</span>${c.actualizado ? `<span class="small muted">Actualizado ${fmtShort(c.actualizado)}</span>` : ''}</div>
+      ${editar ? `<button type="button" class="btn soft" data-cron-edit>${IC.edit} Editar</button>` : ''}</div>
+    <div class="cronrows">
+      <div><span class="lbl">Enfermedad crónica</span><ul>${c.enfermedades.map(e => `<li><b>${esc(e.nombre)}</b><span class="muted"> · ${evolTxt(e)}${evolMeses(e) < 1 ? '' : ' de evolución'}</span></li>`).join('')}</ul></div>
+      <div><span class="lbl">Medicamentos que toma</span>${c.medicamentos.length ? `<div class="chips" style="margin-top:8px">${c.medicamentos.map(m => `<span class="medchip">${esc(m)}</span>`).join('')}</div>` : '<p class="small muted" style="margin:6px 0 0">Sin medicamentos registrados</p>'}</div>
+    </div></div>`;
+}
+function medItems(q) {
+  const m = new Map();
+  S.patients.forEach(p => (p.cronico?.medicamentos || []).forEach(v => { const k = norm(v); const e = m.get(k) || { label: v, n: 0 }; e.n += 10; m.set(k, e); }));
+  MEDS_CRONICOS.forEach(v => { const k = norm(v); if (!m.has(k)) m.set(k, { label: v, n: 0 }); });
+  const n = norm(q);
+  if (!n) return [];
+  return [...m.values()].filter(e => norm(e.label).includes(n)).sort((a, b) => (b.n - a.n) || (norm(a.label).indexOf(n) - norm(b.label).indexOf(n))).slice(0, 8).map(e => ({ label: e.label }));
+}
+
+/* Panel de registro / edición. onDone(true) si se guardó. */
+function editarCronico(p, onDone = () => { }) {
+  const prev = p.cronico || {};
+  const ens = (prev.enfermedades || []).map(e => { const t = evolMeses(e); return { nombre: e.nombre, a: String(Math.floor(t / 12)), m: String(t % 12) }; });
+  const meds = [...(prev.medicamentos || [])];
+  const sh = openSheet(`
+    <div class="shead"><h2>${prev.enfermedades?.length ? 'Editar Px crónico' : 'Registro de Px crónico'}</h2><button class="iconbtn" data-close aria-label="Cerrar">${IC.x}</button></div>
+    <p class="hint">${esc(p.nombre)} · Esta información aparecerá al abrir cada consulta del paciente.</p>
+    <div class="section" style="margin-top:14px"><h3>Enfermedades crónicas</h3></div>
+    <div class="chips" id="cchips" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:10px"><input type="text" id="otraEnf" placeholder="Otra enfermedad crónica" autocomplete="off"><button type="button" class="btn soft" id="addEnf">${IC.plus} Agregar</button></div>
+    <div id="enfRows" style="margin-top:14px"></div>
+    <div class="section" style="margin-top:18px"><h3>Medicamentos que toma</h3></div>
+    <div class="row" style="margin-top:10px"><div class="combo" style="flex:1" id="medCombo"><input type="text" id="medIn" placeholder="Ej.: metformina 850 mg c/12 hrs" autocomplete="off"></div><button type="button" class="btn soft" id="addMed">${IC.plus} Agregar</button></div>
+    <div class="chips" id="medList" style="margin-top:12px"></div>
+    <p class="hint" id="cerr" style="color:#B4232F;margin-top:12px"></p>
+    <div class="sticky-actions"><button class="btn ghost" data-close>Cancelar</button><button class="btn primary" data-save>Guardar</button></div>`);
+  const draw = () => {
+    const sel = new Set(ens.map(e => norm(e.nombre)));
+    const all = [...CRONICAS, ...ens.map(e => e.nombre).filter(n => !CRONICAS.some(c => norm(c) === norm(n)))];
+    $('#cchips', sh).innerHTML = all.map(n => `<button type="button" class="chip ${sel.has(norm(n)) ? 'on' : ''}" data-enf="${esc(n)}" aria-pressed="${sel.has(norm(n))}">${esc(n)}</button>`).join('');
+    $('#enfRows', sh).innerHTML = ens.length ? `<span class="lbl">Tiempo de evolución de cada una</span>` + ens.map((e, i) => `<div class="enfrow">
+        <b>${esc(e.nombre)}</b>
+        <div class="row" style="gap:8px"><input type="text" inputmode="numeric" class="mini" data-i="${i}" data-k="a" value="${esc(e.a)}" aria-label="Años de ${esc(e.nombre)}" placeholder="0"><span class="small">años</span>
+          <input type="text" inputmode="numeric" class="mini" data-i="${i}" data-k="m" value="${esc(e.m)}" aria-label="Meses de ${esc(e.nombre)}" placeholder="0"><span class="small">meses</span>
+          <button type="button" class="iconbtn" data-del="${i}" aria-label="Quitar ${esc(e.nombre)}">${IC.x}</button></div></div>`).join('')
+      : '<p class="hint">Elige una o más enfermedades arriba, o escribe otra.</p>';
+    $('#medList', sh).innerHTML = meds.length ? meds.map((m, i) => `<span class="medchip">${esc(m)}<button type="button" data-mdel="${i}" aria-label="Quitar ${esc(m)}">×</button></span>`).join('')
+      : '<p class="hint">Agrega cada medicamento con su dosis.</p>';
+  };
+  const addEnf = n => { n = (n || '').trim(); if (!n) return; if (!ens.some(e => norm(e.nombre) === norm(n))) ens.push({ nombre: n, a: '', m: '' }); draw(); setTimeout(() => $(`[data-i="${ens.findIndex(e => norm(e.nombre) === norm(n))}"][data-k="a"]`, sh)?.focus(), 30); };
+  const addMed = v => { v = (v || '').trim(); if (!v) return; if (!meds.some(m => norm(m) === norm(v))) meds.push(v); $('#medIn', sh).value = ''; draw(); };
+  sh.addEventListener('click', e => {
+    const c = e.target.closest('[data-enf]');
+    if (c) { const n = c.dataset.enf, i = ens.findIndex(x => norm(x.nombre) === norm(n)); if (i >= 0) { ens.splice(i, 1); draw(); } else addEnf(n); return; }
+    const d = e.target.closest('[data-del]'); if (d) { ens.splice(+d.dataset.del, 1); draw(); return; }
+    const md = e.target.closest('[data-mdel]'); if (md) { meds.splice(+md.dataset.mdel, 1); draw(); }
+  });
+  sh.addEventListener('input', e => { const t = e.target; $('#cerr', sh).textContent = ''; if (t.dataset.i !== undefined) ens[+t.dataset.i][t.dataset.k] = t.value.replace(/[^\d]/g, ''); });
+  $('#addEnf', sh).onclick = () => { addEnf($('#otraEnf', sh).value); $('#otraEnf', sh).value = ''; };
+  $('#otraEnf', sh).onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('#addEnf', sh).click(); } };
+  $('#addMed', sh).onclick = () => addMed($('#medIn', sh).value);
+  attachList($('#medCombo', sh), $('#medIn', sh), medItems, it => addMed(it.label));
+  $('#medIn', sh).addEventListener('keydown', e => { if (e.key === 'Enter' && !$('#medCombo .list', sh)) { e.preventDefault(); addMed($('#medIn', sh).value); } });
+  $$('[data-close]', sh).forEach(b => b.onclick = () => { closeSheet(); onDone(false); });
+  $('[data-save]', sh).onclick = () => {
+    addMed($('#medIn', sh).value);
+    const err = $('#cerr', sh);
+    if (!ens.length) return err.textContent = 'Elige al menos una enfermedad crónica.';
+    const falta = ens.find(e => e.a === '' && e.m === '');
+    if (falta) return err.textContent = `Indica el tiempo de evolución de «${falta.nombre}» (años, meses o ambos).`;
+    const hoy = iso(new Date());
+    p.cronico = { activo: true, actualizado: hoy, medicamentos: meds,
+      enfermedades: ens.map(e => ({ nombre: e.nombre, meses: (parseInt(e.a, 10) || 0) * 12 + (parseInt(e.m, 10) || 0), registrado: hoy })) };
+    save(); closeSheet(); toast('Px crónico guardado'); onDone(true);
+  };
+  draw();
+}
+
+/* Interruptor + tarjeta, reutilizable en la consulta y en la ficha */
+function montarCronico(box, p, onChange = () => { }) {
+  const draw = () => {
+    const on = cronActivo(p);
+    box.innerHTML = `<div class="toggle ${on ? 'on' : ''}" data-cron-tog role="switch" aria-checked="${on}" tabindex="0"><span class="sw"></span>
+      <div><b>Px crónico</b><div class="small muted">${on ? 'Sus enfermedades crónicas y tratamiento se muestran en cada consulta' : 'Actívalo para registrar sus enfermedades crónicas y su tratamiento'}</div></div></div>
+      ${on ? cronCardHTML(p) : ''}`;
+    const tog = $('[data-cron-tog]', box);
+    const flip = async () => {
+      if (!cronActivo(p)) {
+        if (p.cronico?.enfermedades?.length) { p.cronico.activo = true; save(); draw(); onChange(); }
+        else editarCronico(p, ok => { draw(); if (ok) onChange(); });
+      } else if (await confirmBox('Dejará de mostrarse como Px crónico. Lo registrado se conserva por si lo vuelves a activar.', { ok: 'Desactivar', title: 'Quitar Px crónico' })) {
+        p.cronico.activo = false; save(); draw(); onChange();
+      }
+    };
+    tog.onclick = flip; tog.onkeydown = e => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); } };
+    $('[data-cron-edit]', box) && ($('[data-cron-edit]', box).onclick = () => editarCronico(p, ok => { draw(); if (ok) onChange(); }));
+  };
+  draw();
+}
+
 /* ---------------- router ---------------- */
 const view = () => $('#view');
 function go(h) { if (location.hash !== h) location.hash = h; else render(); }
@@ -375,7 +506,7 @@ function viewHoy() {
       ${hoy.length ? hoy.map(c => { const p = pat(c.patientId); const s = c.suive && suiveById(c.suive); return `
         <div class="visit" data-consulta="${c.id}" tabindex="0">
           <div class="time num">${esc(c.hora)}</div>
-          <div><b>${esc(p?.nombre)}</b><div class="dx">${esc(c.dxIssste || 'Sin diagnóstico')}${s ? ` · ${esc(s.nombre)}` : ''}</div></div>
+          <div><b>${esc(p?.nombre)}</b>${cronActivo(p) ? ' <span class="tag" style="vertical-align:2px">Crónico</span>' : ''}<div class="dx">${esc(c.dxIssste || 'Sin diagnóstico')}${s ? ` · ${esc(s.nombre)}` : ''}</div></div>
           <div class="tags">${c.foraneo ? `<span class="tag">${esc(c.procedencia || 'Foráneo')}</span>` : ''}${c.incapacidad ? `<span class="tag o">Incap. ${c.incapDias} d</span>` : ''}${c.lab ? '<span class="tag o">Lab</span>' : ''}${c.img ? '<span class="tag o">Imagen</span>' : ''}${c.meds ? `<span class="tag">${c.meds} med.</span>` : ''}</div>
         </div>`; }).join('') : `<div class="empty"><b>Aún no hay consultas hoy</b>Busca al paciente a la izquierda para registrar la primera.</div>`}
     </section>
@@ -406,7 +537,7 @@ const porRevisar = p => !!(p.fnacAprox || !p.fnac || !p.sexo || p.tipo === '' ||
 function resRow(p) {
   const last = consultasDe(p.id)[0];
   return `<button class="res" data-pid="${p.id}"><span class="avatar ${p.sexo === 'F' ? 'f' : 'm'}">${esc(initials(p.nombre))}</span>
-    <span class="who"><b>${esc(p.nombre)}${porRevisar(p) ? ' <span class="tag o" style="vertical-align:2px">Por revisar</span>' : ''}</b><span>Exp. ${esc(p.expediente || '—')} · ${p.fnac ? ageLabel(p.fnac) + (p.fnacAprox ? '≈' : '') : '¿?'} años · ${sexoTxt(p.sexo)}${p.tipo !== '' && p.tipo !== undefined ? ` · Tipo ${esc(p.tipo)}` : ''}${last ? ` · Última: ${fmtShort(last.fecha)}` : ''}</span></span></button>`;
+    <span class="who"><b>${esc(p.nombre)}${cronActivo(p) ? ' <span class="tag" style="vertical-align:2px">Crónico</span>' : ''}${porRevisar(p) ? ' <span class="tag o" style="vertical-align:2px">Por revisar</span>' : ''}</b><span>Exp. ${esc(p.expediente || '—')} · ${p.fnac ? ageLabel(p.fnac) + (p.fnacAprox ? '≈' : '') : '¿?'} años · ${sexoTxt(p.sexo)}${p.tipo !== '' && p.tipo !== undefined ? ` · Tipo ${esc(p.tipo)}` : ''}${last ? ` · Última: ${fmtShort(last.fecha)}` : ''}</span></span></button>`;
 }
 
 /* =========================================================================
@@ -504,6 +635,7 @@ function openConsulta({ id, patientId }) {
       <div style="flex:1;min-width:0"><h2 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.nombre)}</h2>
       <div class="small muted">Exp. ${esc(p.expediente || '—')} · ${ageLabel(p.fnac, d.fecha)} años · ${sexoTxt(p.sexo)} · Tipo ${esc(tipoTxt(p.tipo) || '—')}</div></div>
       <button class="iconbtn" data-close aria-label="Cerrar">${IC.x}</button></div>
+    <div id="cronBox" style="margin-bottom:16px"></div>
     <div class="form">
       <div class="f s3"><label for="cf">Fecha</label><input id="cf" type="date" data-b="fecha"></div>
       <div class="f s3"><label for="ch">Hora</label><input id="ch" type="time" data-b="hora"></div>
@@ -540,6 +672,7 @@ function openConsulta({ id, patientId }) {
       if (d.incapacidad && !(+d.incapDias > 0)) { d.incapDias = 1; $('#incWrap output', sh).textContent = 1; }
     }
   });
+  montarCronico($('#cronBox', sh), p);
   attachList($('#procCombo', sh), $('#proc', sh), procItems, it => { d.procedencia = it.label; $('#proc', sh).value = it.label; });
   comboSuive($('#suivebox', sh), d, 'suive');
   attachList($('#dxwrap', sh), $('#dx1', sh), dxItems, it => { d.dxIssste = it.label; $('#dx1', sh).value = it.label; });
@@ -557,6 +690,7 @@ function openConsulta({ id, patientId }) {
     if (!d.incapacidad) d.incapDias = 0;
     p.foraneo = d.foraneo; p.procedencia = d.procedencia;   // se recuerda para su siguiente consulta
     d.dxIssste = (d.dxIssste || '').trim();
+    d.cronico = cronActivo(p) ? { enfermedades: p.cronico.enfermedades.map(e => `${e.nombre} (${evolTxt(e)})`), medicamentos: [...p.cronico.medicamentos] } : null;
     if (orig) Object.assign(orig, d); else S.consultas.push(d);
     save(); closeSheet(); toast('Consulta guardada'); render();
   };
@@ -579,7 +713,7 @@ function viewPaciente({ a: id, b: tab = 'consultas' }) {
   <section class="phead glass">
     <span class="avatar ${p.sexo === 'F' ? 'f' : 'm'}">${esc(initials(p.nombre))}</span>
     <div><h1>${esc(p.nombre)}</h1>
-      <div class="meta"><span>Exp. <b>${esc(p.expediente || '—')}</b></span><span><b>${p.fnac ? ageLabel(p.fnac) + (p.fnacAprox ? '≈' : '') : '¿?'}</b> años</span><span>${sexoTxt(p.sexo)}</span><span>Tipo <b>${esc(tipoTxt(p.tipo) || '—')}</b></span>${p.tel ? `<span>Tel. ${esc(p.tel)}</span>` : ''}${p.foraneo && p.procedencia ? `<span>Foráneo · <b>${esc(p.procedencia)}</b></span>` : ''}</div>
+      <div class="meta"><span>Exp. <b>${esc(p.expediente || '—')}</b></span><span><b>${p.fnac ? ageLabel(p.fnac) + (p.fnacAprox ? '≈' : '') : '¿?'}</b> años</span><span>${sexoTxt(p.sexo)}</span><span>Tipo <b>${esc(tipoTxt(p.tipo) || '—')}</b></span>${cronActivo(p) ? '<span class="cronbadge light">Px crónico</span>' : ''}${p.tel ? `<span>Tel. ${esc(p.tel)}</span>` : ''}${p.foraneo && p.procedencia ? `<span>Foráneo · <b>${esc(p.procedencia)}</b></span>` : ''}</div>
       ${p.origen ? `<div class="small" style="color:rgba(255,255,255,.85);margin-top:6px">Historial previo en Excel: ${p.origen.consultas} consulta(s) entre ${fmtShort(p.origen.primera)} y ${fmtShort(p.origen.ultima)}${p.origen.ultimoDx ? ` · último dx: ${esc(p.origen.ultimoDx)}` : ''}</div>` : ''}</div>
     <div class="acts">
       <button class="btn white" id="nc">${IC.plus} Nueva consulta</button>
@@ -598,25 +732,28 @@ function viewPaciente({ a: id, b: tab = 'consultas' }) {
   const body = $('#tabbody');
 
   if (tab === 'consultas') {
-    body.innerHTML = cs.length ? `<div class="timeline">${cs.map(c => { const s = c.suive && suiveById(c.suive); return `
+    body.innerHTML = (cronActivo(p) ? `<section class="card milk" id="cronFicha" style="margin-bottom:18px"></section>` : '') + (cs.length ? `<div class="timeline">${cs.map(c => { const s = c.suive && suiveById(c.suive); return `
       <div class="tl"><div class="card milk" data-c="${c.id}" tabindex="0">
         <div class="row between wrap"><span class="when">${cap(fmtLong(c.fecha))} · ${esc(c.hora)}</span>
           <div class="tags"><span class="tag">${c.tipo === 'primera' ? 'Primera vez' : 'Subsecuente'}</span>${c.foraneo ? `<span class="tag">Foráneo · ${esc(c.procedencia)}</span>` : ''}${c.incapacidad ? `<span class="tag o">Incapacidad ${c.incapDias} día(s)</span>` : ''}${c.lab ? '<span class="tag o">Laboratorio</span>' : ''}${c.img ? '<span class="tag o">Imagen</span>' : ''}<span class="tag">${c.meds || 0} medicamento(s)</span></div></div>
         <div style="margin-top:8px"><b>${esc(c.dxIssste || 'Sin diagnóstico ISSSTE')}</b>${s ? ` <span class="small muted">· SUIVE ${esc(s.clave)} ${esc(s.nombre)}</span>` : ''}</div>
         ${c.nota ? `<div class="txt">${esc(c.nota)}</div>` : ''}
+        ${c.cronico?.medicamentos?.length ? `<div class="small muted" style="margin-bottom:4px">Tratamiento crónico en esa consulta: ${esc(c.cronico.medicamentos.join(', '))}</div>` : ''}
         ${c.sv && (c.sv.ta || c.sv.fc) ? `<div class="small muted">${[c.sv.ta && 'TA ' + c.sv.ta, c.sv.fc && 'FC ' + c.sv.fc, c.sv.fr && 'FR ' + c.sv.fr, c.sv.temp && 'T ' + c.sv.temp + '°', c.sv.sat && 'Sat ' + c.sv.sat + '%'].filter(Boolean).join(' · ')}</div>` : ''}
       </div></div>`; }).join('')}</div>`
-      : `<div class="card milk empty"><b>Sin consultas registradas</b>Usa «Nueva consulta» para abrir su primera hoja.</div>`;
+      : `<div class="card milk empty"><b>Sin consultas registradas</b>Usa «Nueva consulta» para abrir su primera hoja.</div>`);
+    $('#cronFicha') && montarCronico($('#cronFicha'), p, () => viewPaciente({ a: p.id, b: 'consultas' }));
     $$('[data-c]', body).forEach(c => { const f = () => openConsulta({ id: c.dataset.c }); c.onclick = f; c.onkeydown = e => e.key === 'Enter' && f(); });
   }
 
   if (tab === 'antecedentes') {
     body.innerHTML = `<section class="card milk">
       <div class="row between wrap" style="margin-bottom:12px"><div><h2>Antecedentes</h2><p class="hint">Se usan para redactar la presentación del caso. Se guardan solos. Deja vacío lo que el paciente niega.</p></div><span class="tag" id="sv-ind">Guardado</span></div>
+      <div id="cronAnt" style="margin-bottom:16px"></div>
       <div class="form">
         <div class="f s6"><label>Heredofamiliares</label><textarea data-b="ahf" placeholder="Ej.: madre y padre con HAS y DM2, un hermano con DM2"></textarea></div>
-        <div class="f s6"><label>Enfermedades crónicas (patológicos)</label><textarea data-b="patologicos" placeholder="Ej.: hipertensión arterial de 5 años de evolución, dislipidemia"></textarea></div>
-        <div class="f"><label>Tratamiento actual</label><input type="text" data-b="tratamiento" placeholder="Ej.: telmisartán 40 mg por las mañanas, amlodipino 1 c/12 hrs"></div>
+        <div class="f s6"><label>${cronActivo(p) ? 'Otros antecedentes patológicos' : 'Enfermedades crónicas (patológicos)'}</label><textarea data-b="patologicos" placeholder="${cronActivo(p) ? 'Solo lo que no esté en Px crónico' : 'Ej.: hipertensión arterial de 5 años de evolución, dislipidemia'}"></textarea></div>
+        <div class="f"><label>${cronActivo(p) ? 'Otro tratamiento' : 'Tratamiento actual'}</label><input type="text" data-b="tratamiento" placeholder="Ej.: telmisartán 40 mg por las mañanas, amlodipino 1 c/12 hrs"></div>
         <div class="f s6"><label>Quirúrgicos</label><input type="text" data-b="quirurgicos" placeholder="Vacío = niega"></div>
         <div class="f s6"><label>Alérgicos</label><input type="text" data-b="alergicos" placeholder="Vacío = niega"></div>
         <div class="f s6"><label>Transfusionales</label><input type="text" data-b="transfusionales" placeholder="Vacío = niega"></div>
@@ -628,6 +765,7 @@ function viewPaciente({ a: id, b: tab = 'consultas' }) {
         ${p.sexo === 'F' ? `<div class="f"><label>Gineco-obstétricos</label><textarea data-b="gineco" placeholder="Ej.: menarca a los 11 años, ritmo 28/3, IVSA 21 años, G2 P2, menopausia hace 15 años"></textarea></div>` : ''}
         <div class="f"><label>Otros antecedentes relevantes</label><textarea data-b="otros" placeholder="Ej.: hospitalización por COVID hace seis meses" style="min-height:70px"></textarea></div>
       </div></section>`;
+    montarCronico($('#cronAnt'), p, () => viewPaciente({ a: p.id, b: 'antecedentes' }));
     let t;
     bindForm(body, p.antecedentes, () => { $('#sv-ind').textContent = 'Guardando…'; save(); clearTimeout(t); t = setTimeout(() => $('#sv-ind') && ($('#sv-ind').textContent = 'Guardado'), 500); });
   }
@@ -684,7 +822,13 @@ function redactarPresentacion(r) {
   // Párrafo 1: ficha, antecedentes y hábitos
   const head = [];
   if (!vacio(a.ahf)) head.push(`con antecedentes heredofamiliares de ${lcFirst(noDot(a.ahf))}`);
-  if (!vacio(a.patologicos)) head.push(`portador${F ? 'a' : ''} de ${lcFirst(noDot(a.patologicos))}${!vacio(a.tratamiento) ? ` con tratamiento a base de ${lcFirst(noDot(a.tratamiento))}` : ''}`);
+  if (cronActivo(p)) {
+    const cr = p.cronico;
+    const enf = cr.enfermedades.map(e => `${lcFirst(e.nombre)} ${evolMeses(e) < 1 ? 'de reciente diagnóstico' : `de ${evolTxt(e)} de evolución`}`);
+    if (!vacio(a.patologicos)) enf.push(lcFirst(noDot(a.patologicos)));
+    const meds = cr.medicamentos.map(lcFirst); if (!vacio(a.tratamiento)) meds.push(lcFirst(noDot(a.tratamiento)));
+    head.push(`portador${F ? 'a' : ''} de ${joinY(enf)}${meds.length ? `, con tratamiento a base de ${joinY(meds)}` : ''}`);
+  } else if (!vacio(a.patologicos)) head.push(`portador${F ? 'a' : ''} de ${lcFirst(noDot(a.patologicos))}${!vacio(a.tratamiento) ? ` con tratamiento a base de ${lcFirst(noDot(a.tratamiento))}` : ''}`);
   else if (!vacio(a.tratamiento)) head.push(`con tratamiento actual a base de ${lcFirst(noDot(a.tratamiento))}`);
   let p1 = `${F ? 'Femenino' : 'Masculino'} de la ${decada(edad)} década de la vida${head.length ? ', ' + head.join(', ') : ''}.`;
 
@@ -724,7 +868,9 @@ function viewReferencia({ a: id }) {
   if (!r || !p) { view().innerHTML = vhead('Solicitud no encontrada'); return; }
   r.gen ??= { sv: {} }; r.cita ??= {};
   const a = p.antecedentes || {};
-  const antList = [['Heredofamiliares', a.ahf], ['Crónicos', a.patologicos], ['Tratamiento', a.tratamiento], ['Quirúrgicos', a.quirurgicos || 'Niega'], ['Alérgicos', a.alergicos || 'Niega'],
+  const cr = cronActivo(p) ? p.cronico : null;
+  const antList = [['Heredofamiliares', a.ahf], ['Crónicos', cr ? [...cr.enfermedades.map(e => `${e.nombre} (${evolTxt(e)})`), a.patologicos].filter(Boolean).join(', ') : a.patologicos],
+    ['Tratamiento', cr ? [...cr.medicamentos, a.tratamiento].filter(Boolean).join(', ') : a.tratamiento], ['Quirúrgicos', a.quirurgicos || 'Niega'], ['Alérgicos', a.alergicos || 'Niega'],
     ['Transfusionales', a.transfusionales || 'Niega'], ['Traumáticos', a.traumaticos || 'Niega'], ['Hábitos', a.habitos || 'Buenos'], ['Animales', a.mascotas || 'Niega'], ['Actividad física', a.deporte || 'Niega']];
   view().innerHTML = `
   <button class="btn onglass" id="back" style="margin-bottom:14px">${IC.back} ${esc(p.nombre)}</button>

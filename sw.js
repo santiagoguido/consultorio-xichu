@@ -1,5 +1,5 @@
 // Sube el número de versión cada vez que cambies algún archivo para que el iPad tome la actualización.
-const CACHE = 'consultorio-v6';
+const CACHE = 'consultorio-v7';
 const FILES = ['./', 'index.html', 'app.css', 'app.js', 'suive.js', 'frases.js', 'manifest.webmanifest',
   'vendor/jspdf.js', 'vendor/autotable.js', 'vendor/docx.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];

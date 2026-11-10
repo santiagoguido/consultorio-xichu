@@ -218,3 +218,57 @@ body[data-amb="particular"] .ambchip{background:var(--ocaso);color:#04393B;borde
   .vv-trans .vv-lines{max-height:230px;flex:none}
   .vv-who b{max-width:200px}
 }
+
+/* ---------- semáforo de la consulta en vivo ---------- */
+/* botón de «Hoy»: verde listo · ámbar con limitación · rojo no disponible */
+.vv-pre{flex:none;max-width:44%;display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:6px 14px;border-radius:999px;font-size:14px;font-weight:600;line-height:1.2;background:rgba(255,255,255,.18);color:#fff}
+.vv-pre:empty{display:none}
+.vv-pre svg{width:18px;height:18px;flex:none}
+.vv-pre .gira{width:14px;height:14px;flex:none;border-radius:50%;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;animation:vvgira .9s linear infinite}
+.vivocta[data-n="ok"] .vv-pre{background:#E4FBF1;color:#0A6245}
+.vivocta[data-n="aviso"] .vv-pre{background:#FFF1D1;color:#6E4A00}
+.vivocta[data-n="falla"] .vv-pre{background:#FFE3E3;color:#8E1B1B}
+.vivocta[data-n="ok"] .mic{color:#0E9F6E;box-shadow:0 0 0 4px #36D9A0}
+.vivocta[data-n="aviso"] .mic{color:#9A6700;box-shadow:0 0 0 4px #FFC14D}
+.vivocta[data-n="falla"] .mic{color:#C62828;box-shadow:0 0 0 4px #FF7A7A}
+@keyframes vvgira{to{transform:rotate(360deg)}}
+@media (max-width:760px){.vivocta{flex-wrap:wrap}.vv-pre{order:5;max-width:100%;margin-left:76px}}
+@media (prefers-reduced-motion:reduce){.vv-pre .gira{animation:none}}
+/* hoja de consentimiento y hoja de detalle */
+.vv-prebox:empty{display:none}
+.vv-prebox{margin-top:14px;padding:12px 14px;border-radius:14px;background:rgba(26,22,80,.05)}
+.vv-prehead{display:flex;align-items:center;gap:8px;font-size:15px;color:#0A6245}
+.vv-prehead svg{width:20px;height:20px;flex:none}
+.vv-prehead.aviso{color:#7A5200}.vv-prehead.falla{color:#A32020}
+.vv-prebox .vv-sal{margin-top:8px}
+.vv-sal{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.vv-sal li{display:flex;align-items:flex-start;gap:10px;font-size:15px}
+.vv-sal li i{width:12px;height:12px;flex:none;border-radius:50%;margin-top:5px;background:#17B87E}
+.vv-sal li.aviso i{background:#F0A000}.vv-sal li.falla i{background:#E5484D}.vv-sal li.info i{background:#9A97B2}
+.vv-sal li span{display:flex;flex-direction:column;gap:1px;min-width:0}
+.vv-sal li small{font-size:13px;color:var(--ink-soft)}
+/* durante la consulta: pastilla junto al cronómetro y franja cuando algo falla */
+.vv-recw{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.vv-salud{display:inline-flex;align-items:center;gap:7px;min-height:40px;padding:0 14px;border-radius:999px;font-size:13px;font-weight:600;cursor:pointer;background:#0F2A22;border:1px solid #1F6B50;color:#5CE6B4}
+.vv-salud svg{width:18px;height:18px;flex:none}
+.vv-salud span{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vv-salud[data-n="aviso"]{background:#2B2210;border-color:#7A5A14;color:#FFCB66}
+.vv-salud[data-n="falla"]{background:#4A1218;border-color:#D2434F;color:#FFC2C2;animation:vvalerta 1.4s ease-in-out infinite}
+@keyframes vvalerta{50%{box-shadow:0 0 0 5px rgba(255,92,92,.35)}}
+.vv-salud:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.vv-fallo{flex:none;margin:12px 16px 0;padding:11px 14px;display:flex;align-items:center;gap:12px;border-radius:12px;font-size:14px}
+.vv-fallo svg{width:22px;height:22px;flex:none}
+.vv-fallo > div{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.vv-fallo b{font-size:15px}
+.vv-fallo.falla{background:#4A1218;border:1px solid #D2434F;color:#FFE1E1}
+.vv-fallo.falla svg,.vv-fallo.falla b{color:#FF9C9C}
+.vv-fallo.aviso{background:#2B2210;border:1px solid #7A5A14;color:#FFE9BF}
+.vv-fallo.aviso svg,.vv-fallo.aviso b{color:#FFCB66}
+@media (prefers-reduced-motion:reduce){.vv-salud[data-n="falla"]{animation:none}}
+/* transcripción recién oída (todavía sin revisar por el asistente) */
+.vv-lines .ln.prov p{opacity:.72;font-style:italic}
+.vv-lines .ln.prov b{color:#8E8BA8}
+/* barra de descarga del modelo de voz (Ajustes) */
+.vv-barra{height:8px;border-radius:999px;background:rgba(26,22,80,.1);overflow:hidden;margin-top:10px}
+.vv-barra[hidden]{display:none}
+.vv-barra i{display:block;height:100%;width:0;border-radius:999px;background:var(--violeta);transition:width .3s}

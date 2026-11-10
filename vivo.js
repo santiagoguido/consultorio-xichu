@@ -1,15 +1,19 @@
 'use strict';
 /* =========================================================================
    CONSULTA EN VIVO
-   La tableta escucha la consulta por fragmentos, los envía a Gemini y va
-   llenando la historia clínica, las sugerencias y la receta sin detener la
-   grabación. El audio nunca se guarda: se envía y se descarta.
+   La tableta escucha la consulta sin detener la grabación. La voz se corta
+   en las pausas y se transcribe en el propio iPad (Whisper, vivo-whisper.js);
+   a Gemini solo se le envía el texto para llenar la historia clínica, las
+   sugerencias y la receta. Si la transcripción local no está disponible, se
+   envía el audio como antes (respaldo). El audio nunca se guarda.
    Usa utilidades de app.js ($, esc, openSheet, Store, S, AMB…) al ejecutarse.
    ========================================================================= */
 const Vivo = (() => {
   const CFG_KEY = 'vivo-cfg';
   const API = 'https://generativelanguage.googleapis.com/v1beta/models';
-  const cfg = { apiKey: '', model: 'gemini-flash-latest', seg: 20 };
+  /* modo: 'local' transcribe en el iPad · 'audio' envía el audio a Gemini. wmodelo: modelo de voz. wlisto: modelos ya preparados en este iPad.
+     seg: duración máxima de un fragmento. cada: segundos mínimos entre análisis de Gemini. rapido: respuesta con poco razonamiento. beep: aviso sonoro. */
+  const cfg = { apiKey: '', model: 'gemini-flash-latest', seg: 20, modo: 'local', wmodelo: 'base', wlisto: {}, cada: 20, rapido: true, beep: true };
   let cfgOk = false, ses = null;
 
   const PRIORITARIOS = ['faringitis y faringoamigdalitis aguda', 'gastroenteritis aguda', 'cistitis e infección de vías urinarias no complicada',
@@ -48,18 +52,33 @@ const Vivo = (() => {
     try {
       res = await fetch(`${API}${path}`, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cfg.apiKey }, body: body ? JSON.stringify(body) : undefined, signal: ctl.signal });
     } catch (e) {
-      const err = new Error(e.name === 'AbortError' ? 'Gemini tardó demasiado en responder' : 'Sin conexión con Gemini (revisa el internet)'); err.code = 0; throw err;
+      const lento = e.name === 'AbortError', err = new Error(lento ? 'Gemini tardó demasiado en responder' : 'Sin conexión con Gemini (revisa el internet)'); err.code = 0; err.red = !lento; throw err;
     } finally { clearTimeout(t); }
     let data = null; try { data = await res.json(); } catch (e) { }
     if (!res.ok) {
-      const m = data?.error?.message || '';
+      const m = data?.error?.message || '', clave = (res.status === 400 || res.status === 403) && /api key|API_KEY|permission/i.test(m);
       const err = new Error(res.status === 429 ? 'Se alcanzó el límite de uso de Gemini por ahora'
         : res.status === 404 ? 'Ese modelo no existe o no está disponible: elige otro en «Ver modelos»'
-        : (res.status === 400 || res.status === 403) && /api key|API_KEY|permission/i.test(m) ? 'La clave de Gemini no es válida'
+        : clave ? 'La clave de Gemini no es válida'
         : `Gemini respondió con error ${res.status}${m ? ': ' + m.slice(0, 160) : ''}`);
-      err.code = res.status; throw err;
+      err.code = res.status; err.raw = m; err.clave = clave; throw err;
     }
     return data;
+  }
+  /* Pide el análisis. Con «respuesta rápida» se le pide al modelo razonar poco (responde en menos tiempo);
+     si el modelo elegido no acepta ese ajuste, se repite sin él y ya no se vuelve a intentar. */
+  const sinPensar = {};
+  async function generar(esTxt, parts) {
+    const ruta = `/${encodeURIComponent(cfg.model)}:generateContent`, pensar = cfg.rapido && !sinPensar[cfg.model];
+    const cuerpo = p => ({
+      systemInstruction: { parts: [{ text: esTxt ? SISTEMA_TXT : SISTEMA }] }, contents: [{ role: 'user', parts }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.2, ...(p ? { thinkingConfig: { thinkingLevel: 'low' } } : {}) }
+    });
+    try { return await gem(ruta, cuerpo(pensar)); }
+    catch (e) {
+      if (!pensar || e.code !== 400 || !/think/i.test(e.raw || '')) throw e;
+      sinPensar[cfg.model] = true; return gem(ruta, cuerpo(false));
+    }
   }
   const textoDe = d => {
     const c = d?.candidates?.[0];
@@ -74,10 +93,15 @@ const Vivo = (() => {
 
   /* ---------------- instrucciones para el modelo ---------------- */
   const FORMA = '{"transcripcion":[{"quien":"medico","texto":""}],"historia":{"motivo":"","padecimiento":"","ahf":"","app":"","ago":"","alergias":"","medicamentos":"","estudios":"","exploracion":"","sv":{"ta":"","fc":"","fr":"","temp":"","sat":"","peso":"","talla":"","gluc":""}},"por_confirmar":[],"alarma":"","preguntas":[""],"exploracion_sugerida":[{"nombre":"","como":"","orienta":"","fuente":""}],"diagnosticos":[{"nombre":"","cie10":"","nivel":"alto","a_favor":"","falta":""}],"estudios_sugeridos":[""],"estudios_solicitados":{"laboratorio":false,"imagen":false},"receta":{"dictados":[{"medicamento":"","indicacion":"","controlado":false}],"propuestas":[{"medicamento":"","indicacion":"","motivo":"","controlado":false}],"indicaciones":""},"plan":""}';
-  const SISTEMA = `Eres un asistente clínico que acompaña en silencio una consulta de medicina general en México. Recibes fragmentos consecutivos del audio de la consulta (la médica, el paciente y a veces un acompañante) y mantienes al día la historia clínica, las sugerencias para la médica y la receta. La médica decide siempre: tú solo propones.
+  /* Dos variantes de las mismas instrucciones: cuando llega audio (respaldo) y cuando llega el texto ya transcrito en el iPad. */
+  const R_AUDIO = ['Recibes fragmentos consecutivos del audio de la consulta',
+    'Transcripción: escribe en español solo lo que se oye en el audio nuevo, sin inventar ni completar. Indica quién habla con "medico", "paciente", "acompanante" o "desconocido" (dedúcelo por el contenido). Si el audio es silencio, ruido o no se entiende, devuelve "transcripcion": [] y repite el ESTADO ACTUAL sin cambios.'];
+  const R_TEXTO = ['Recibes, en fragmentos consecutivos, el texto de la consulta ya transcrito automáticamente en la tableta',
+    'Transcripción: devuelve en "transcripcion" el TEXTO NUEVO completo, repartido según quién habla: "medico", "paciente", "acompanante" o "desconocido" (dedúcelo por el contenido; un mismo renglón puede traer varias voces seguidas). El texto viene de un reconocimiento de voz automático: corrige solo los errores evidentes (un medicamento o un término médico mal escrito, palabras partidas) apoyándote en el contexto, sin agregar, resumir ni quitar contenido. Si una dosis, una cifra o el nombre de un medicamento queda dudoso, no lo adivines: déjalo como llegó y agrega el campo afectado a "por_confirmar". Si el texto nuevo no es conversación real (ruido, palabras sueltas sin sentido), devuelve "transcripcion": [] y repite el ESTADO ACTUAL sin cambios.'];
+  const sistema = ([entrada, regla1]) => `Eres un asistente clínico que acompaña en silencio una consulta de medicina general en México. ${entrada} (la médica, el paciente y a veces un acompañante) y mantienes al día la historia clínica, las sugerencias para la médica y la receta. La médica decide siempre: tú solo propones.
 
 Reglas:
-1. Transcripción: escribe en español solo lo que se oye en el audio nuevo, sin inventar ni completar. Indica quién habla con "medico", "paciente", "acompanante" o "desconocido" (dedúcelo por el contenido). Si el audio es silencio, ruido o no se entiende, devuelve "transcripcion": [] y repite el ESTADO ACTUAL sin cambios.
+1. ${regla1}
 2. Historia clínica: parte del ESTADO ACTUAL y agrega lo nuevo. No borres datos previos salvo que se corrijan en la conversación. Redacción médica breve, en tercera persona. Nunca inventes datos: deja "" lo que no se ha mencionado. Si la médica dice en voz alta signos vitales o hallazgos de la exploración, regístralos (peso en kg, talla en metros, temperatura en °C, TA como 120/80). No modifiques los campos listados en "campos_fijos". "ago" solo aplica a mujeres.
 3. "por_confirmar": claves de campos de la historia cuyo dato es dudoso (lo dijo el acompañante, se oyó mal o es contradictorio).
 4. Sugerencias, siempre breves y accionables: hasta 3 "preguntas" útiles que aún no se han hecho; hasta 2 maniobras en "exploracion_sugerida" con instrucciones concretas de cómo hacerlas y qué orientan; hasta 4 "diagnosticos" probables con "nivel" ("alto", "medio", "bajo" o "descartar"), lo que hay "a_favor" y lo que "falta"; "alarma" solo si hay datos de alarma reales (qué buscar y cuándo referir), si no "". No repitas nada de la lista "hechas".
@@ -86,8 +110,10 @@ Reglas:
 7. Receta: en "dictados" van únicamente los medicamentos que la médica dijo en voz alta que va a indicar, con la indicación como la dijo (dosis, frecuencia y duración). En "propuestas" puedes sugerir hasta 3 medicamentos de primera línea para el diagnóstico más probable, con dosis según edad y peso, tomando en cuenta alergias, embarazo y medicamentos actuales; si falta información esencial para proponer con seguridad, no propongas. No repitas los que ya están en la receta ni los descartados. Marca "controlado": true en psicotrópicos, estupefacientes y otros que requieren receta especial. "indicaciones": medidas no farmacológicas y datos de alarma que la médica le haya dicho al paciente.
 8. "estudios_solicitados": true solo si la médica dijo que solicita laboratorio o imagen. "plan": resumen breve del plan que la médica haya dicho.
 9. Responde únicamente con JSON válido, sin texto adicional, exactamente con esta forma: ${FORMA}`;
+  const SISTEMA = sistema(R_AUDIO), SISTEMA_TXT = sistema(R_TEXTO);
 
-  function contexto() {
+  /* lote: renglones de texto nuevo ({txt, ini}); sin lote, el fragmento va como audio adjunto */
+  function contexto(lote) {
     const p = ses.p, an = [];
     const enRx = ses.rx.filter(r => r.estado === 'aceptado');
     const estado = {
@@ -98,13 +124,15 @@ Reglas:
       },
       diagnostico_elegido_por_la_medica: ses.fijo.dx ? ses.dxSel : '', hechas: ses.hechas
     };
-    if (ses.trans.length) an.push('ÚLTIMAS LÍNEAS YA TRANSCRITAS:\n' + ses.trans.slice(-10).map(l => `${l.q}: ${l.t}`).join('\n'));
+    const previas = ses.trans.filter(l => !l.prov).slice(-10);     // las provisionales son justo el texto nuevo: no se repiten
+    if (previas.length) an.push('ÚLTIMAS LÍNEAS YA TRANSCRITAS:\n' + previas.map(l => `${l.q}: ${l.t}`).join('\n'));
+    if (lote) an.push('TEXTO NUEVO DE LA CONSULTA (transcrito automáticamente, sin indicar quién habla; puede traer errores de reconocimiento, sobre todo en medicamentos, cifras y términos médicos):\n' + lote.map(l => `[${mmss(l.ini)}] ${l.txt}`).join('\n'));
     return `CONSULTORIO: ${AMBITOS[ses.amb].nombre}
 PACIENTE: ${sexoTxt(p.sexo) || 'sexo no registrado'}${edadTxt(p) ? ', ' + edadTxt(p) : ''}. Consulta ${ses.primera ? 'de primera vez' : 'subsecuente'}.
 MINUTO DE LA CONSULTA: ${mmss(ses.seg)}
 ESTADO ACTUAL (JSON): ${JSON.stringify(estado)}
 ${an.join('\n')}
-Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el JSON actualizado.`;
+${lote ? 'Analiza el TEXTO NUEVO y devuelve el JSON actualizado.' : 'Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el JSON actualizado.'}`;
   }
 
   /* ---------------- audio: micrófono → fragmentos WAV de 16 kHz ---------------- */
@@ -131,16 +159,157 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
     return btoa(bin);
   }
 
+  /* ---------------- transcripción en el iPad: Whisper en un hilo aparte (vivo-whisper.js) ---------------- */
+  const TAM = { base: { webgpu: 207, wasm: 77 }, small: { webgpu: 586, wasm: 249 } };      // MB aproximados de descarga
+  const WSP = { w: null, est: 'no', dev: '', modelo: '', err: '', bytes: 0, n: 0, esp: new Map(), carga: null, cargando: '', oyentes: new Set() };
+  const wspAviso = () => WSP.oyentes.forEach(f => { try { f(); } catch (e) { console.error(e); } });
+  function wspWorker() {
+    if (WSP.w) return WSP.w;
+    const w = new Worker('vivo-whisper.js', { type: 'module' });
+    w.onmessage = e => {
+      const m = e.data;
+      if (m.t === 'prog') { WSP.bytes = m.loaded; return wspAviso(); }
+      const p = WSP.esp.get(m.id); if (!p) return;
+      WSP.esp.delete(m.id); clearTimeout(p.t);
+      m.t === 'error' ? p.no(new Error(m.msg)) : p.si(m);
+    };
+    w.onerror = e => { e.preventDefault?.(); wspCae('El motor de voz no pudo iniciar' + (e.message ? ': ' + e.message : '')); };
+    return WSP.w = w;
+  }
+  /* el hilo murió o se colgó: se descarta y quien esperaba recibe el error (la consulta sigue con el respaldo por audio) */
+  function wspCae(msg) {
+    try { WSP.w?.terminate(); } catch (e) { }
+    WSP.w = null; WSP.est = 'error'; WSP.err = msg; WSP.carga = null; WSP.modelo = '';
+    const esp = [...WSP.esp.values()]; WSP.esp.clear();
+    esp.forEach(p => { clearTimeout(p.t); p.no(new Error(msg)); });
+    wspAviso();
+  }
+  function wspPide(m, ms) {
+    return new Promise((si, no) => {
+      const id = ++WSP.n, t = ms ? setTimeout(() => wspCae('El motor de voz tardó demasiado'), ms) : 0;
+      WSP.esp.set(id, { si, no, t });
+      try { wspWorker().postMessage({ ...m, id }, m.audio ? [m.audio.buffer] : []); }
+      catch (e) { WSP.esp.delete(id); clearTimeout(t); no(e); }
+    });
+  }
+  /* carga (y la primera vez descarga) el modelo de voz; después queda listo en memoria para todas las consultas */
+  function wspCargar(modelo = cfg.wmodelo) {
+    if (WSP.est === 'listo' && WSP.modelo === modelo) return Promise.resolve();
+    if (WSP.carga && WSP.cargando === modelo) return WSP.carga;
+    if (typeof Worker === 'undefined') { WSP.est = 'error'; WSP.err = 'Este navegador no permite transcribir en el dispositivo'; wspAviso(); return Promise.reject(new Error(WSP.err)); }
+    WSP.est = 'cargando'; WSP.cargando = modelo; WSP.bytes = 0; WSP.err = ''; wspAviso();
+    return WSP.carga = wspPide({ t: 'cargar', modelo }).then(m => {
+      WSP.est = 'listo'; WSP.modelo = m.modelo; WSP.dev = m.dev; WSP.carga = null;
+      cfg.wlisto = { ...cfg.wlisto, [m.modelo]: m.dev }; guardarCfg();
+      try { navigator.storage?.persist?.()?.catch?.(() => { }); } catch (e) { }
+      previo.t = 0; wspAviso();
+    }, e => {
+      WSP.carga = null; if (WSP.est !== 'error' || !WSP.err) { WSP.est = 'error'; WSP.err = e.message; }
+      if (/fetch|network|load failed/i.test(WSP.err)) WSP.err = 'no se pudo descargar el modelo de voz (revisa el internet)';
+      wspAviso(); throw e;
+    });
+  }
+  const wspTr = f32 => wspPide({ t: 'tr', audio: f32 }, 60000);
+  /* ¿siguen guardados en el iPad los archivos del modelo? (el sistema puede borrarlos si falta espacio) */
+  async function enCache(modelo) {
+    try { const ks = await (await caches.open('transformers-cache')).keys(); return ks.some(r => r.url.includes('whisper-' + modelo) && r.url.includes('encoder_model')); }
+    catch (e) { return true; }
+  }
+  const localLista = () => cfg.modo === 'local' && !!cfg.wlisto[cfg.wmodelo];
+  /* Antes de una consulta: deja el modelo en memoria solo si sigue guardado en el iPad. Nunca lo descarga a media consulta
+     (son cientos de MB); si el sistema lo borró, se marca como «sin preparar» y la consulta usa el respaldo por audio. */
+  async function wspAuto() {
+    if (!localLista()) return false;
+    if (WSP.est === 'listo' && WSP.modelo === cfg.wmodelo) return true;
+    if (!(await enCache(cfg.wmodelo))) { const w = { ...cfg.wlisto }; delete w[cfg.wmodelo]; cfg.wlisto = w; guardarCfg(); previo.t = 0; wspAviso(); return false; }
+    wspCargar().catch(e => console.error(e)); return true;
+  }
+  /* Whisper a veces «oye» frases típicas de subtítulos cuando solo hay ruido: se descartan, igual que las repeticiones en bucle */
+  const ALUCINA = /subt[ií]tulos? (realizados|creados|hechos|por)|amara\.org|gracias por ver|suscr[ií]b(ete|anse|ite)|dale (a )?like|m[aá]s informaci[oó]n (en )?www\./i;
+  function limpia(t) {
+    t = String(t || '').replace(/\[[^\]]*\]|\([^)]*\)|[♪♫]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!t || ALUCINA.test(t) || !/[a-záéíóúñ0-9]/i.test(t)) return '';
+    const out = [];
+    (t.match(/[^.!?…]+[.!?…]*/g) || [t]).forEach(x => {
+      x = x.trim(); const n = out.length;
+      if (x && !(n >= 2 && norm(out[n - 1]) === norm(x) && norm(out[n - 2]) === norm(x))) out.push(x);
+    });
+    return out.join(' ');
+  }
+
+  /* Corte por pausas (solo con transcripción local): junta la voz en fragmentos que terminan en un silencio.
+     Lo que no trae voz no se procesa; un fragmento nunca pasa de 28 s (el máximo que Whisper atiende de una vez). */
+  const vadNuevo = () => ({ ruido: 0.004, voz: false, hab: 0, sil: 0, esp: 0, rms: [], t0: 0 });
+  function oir(s, f) {
+    const v = s.vad, fd = f.length / s.rate;
+    let q = 0; for (let i = 0; i < f.length; i += 4) q += f[i] * f[i];
+    const r = Math.sqrt(q / (f.length / 4));
+    v.ruido = r < v.ruido ? v.ruido * 0.7 + r * 0.3 : v.ruido * 0.998 + r * 0.002;        // piso de ruido del cuarto
+    const habla = r > Math.min(0.05, Math.max(0.006, v.ruido * 3));
+    if (!v.voz && !habla) {
+      s.buf.push(f); s.bufLen += f.length;
+      while (s.buf.length > 4) s.bufLen -= s.buf.shift().length;                           // guarda ~0.3 s por si empieza una palabra
+      if ((v.esp += fd) >= 6) { v.esp = 0; s.stats.sil++; if (!pend(s)) estado('Escuchando (silencio)'); pintaTec(); }
+      return;
+    }
+    if (!v.voz) { Object.assign(v, { voz: true, hab: 0, sil: 0, esp: 0, rms: s.buf.map(() => 0), t0: s.seg }); if (s.est === 'Escuchando (silencio)') estado('Escuchando'); }
+    s.buf.push(f); s.bufLen += f.length; v.rms.push(r);
+    if (habla) { v.hab += fd; v.sil = 0; } else v.sil += fd;
+    const dur = s.bufLen / s.rate, min = s.trCola ? 12 : (WSP.dev === 'webgpu' ? 4 : 8), max = Math.min(28, cfg.seg);
+    if ((dur >= min && v.sil >= 0.7) || v.sil >= 2 || dur >= max) cerrarSeg(s, dur >= max && v.sil < 0.3);
+  }
+  function cerrarSeg(s, forzado) {
+    const v = s.vad; if (!v.voz || !s.buf.length) return;
+    const fl = s.buf[0].length; let n = s.buf.length;
+    if (forzado) {                       // no hubo pausa: corta en el instante más callado de los últimos 3 s para no partir una palabra
+      let m = Infinity; const tot = n;
+      for (let i = Math.max(1, tot - Math.ceil(3 * s.rate / fl)); i < tot - 1; i++) if (v.rms[i] <= m) { m = v.rms[i]; n = i + 1; }
+    } else n = Math.max(1, n - Math.max(0, Math.floor((v.sil - 0.3) * s.rate / fl)));     // quita el silencio del final, menos ~0.3 s
+    const partes = s.buf.slice(0, n), resto = forzado ? s.buf.slice(n) : [], ini = v.t0, hab = v.hab;
+    let len = 0; partes.forEach(c => len += c.length);
+    s.buf = resto; s.bufLen = resto.reduce((a, c) => a + c.length, 0);
+    Object.assign(v, resto.length ? { voz: true, hab: s.bufLen / s.rate, sil: 0, rms: v.rms.slice(n), t0: s.seg } : { voz: false, hab: 0, sil: 0, esp: 0, rms: [] });
+    if (hab < 0.25) { s.stats.sil++; return pintaTec(); }                                  // un golpe o un ruido corto, no voz
+    despachar(s, { pcm: a16k(partes, len, s.rate), ini, t0: performance.now() });
+  }
+  /* un fragmento de voz: se transcribe aquí y se encola el texto; si Whisper no está o falla, el fragmento se encola como audio */
+  function despachar(s, seg) {
+    if (WSP.est !== 'listo') { s.cola.push(seg); return bombear(); }
+    s.trCola++; if (!s.enviando) estado('Transcribiendo…');
+    s.trHilo = s.trHilo.then(async () => {
+      if (ses !== s || s.cancel) return;
+      const t0 = performance.now();
+      try {
+        if (WSP.est !== 'listo') throw new Error(WSP.err || 'La transcripción en el iPad no está disponible');
+        const f = new Float32Array(seg.pcm.length); for (let i = 0; i < f.length; i++) f[i] = seg.pcm[i] / 32768;
+        const m = await wspTr(f);
+        if (ses !== s) return;
+        s.stats.tr.push((performance.now() - t0) / 1000);
+        const t = limpia(m.texto);
+        if (!t) s.stats.sil++;
+        else { const id = uid(); s.trans.push({ q: 'desconocido', t, s: seg.ini, id, prov: true }); s.cola.push({ txt: t, ini: seg.ini, id, t0: seg.t0 }); pintaTrans(); }
+      } catch (e) {
+        console.error(e); if (ses !== s) return;
+        s.stats.trErr++; s.cola.push(seg);
+      } finally {
+        if (ses === s) { s.trCola--; if (!s.enviando && !s.trCola) estado(reposo(s)); pintaTec(); bombear(); }
+      }
+    });
+  }
+  const pend = s => !!(s.enviando || s.cola.length || s.trCola);
+  const reposo = s => s.fin ? (pend(s) ? 'Procesando lo último…' : 'Consulta finalizada') : s.pausado ? 'En pausa' : 'Escuchando';
+
   async function micStart() {
     const s = ses, AC = window.AudioContext || window.webkitAudioContext;
     if (!AC || !navigator.mediaDevices?.getUserMedia) throw new Error('Este navegador no permite usar el micrófono desde la app.');
+    s.micListo = false;
     const ac = new AC(); s.ac = ac;                     // se crea dentro del toque del usuario (requisito de Safari)
     ac.resume?.().catch(() => { });
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
     if (ses !== s) { stream.getTracks().forEach(t => t.stop()); ac.close(); return; }
-    s.stream = stream; s.rate = ac.sampleRate; s.buf = []; s.bufLen = 0;
+    s.stream = stream; s.rate = ac.sampleRate; s.buf = []; s.bufLen = 0; s.vad = vadNuevo();
     const src = ac.createMediaStreamSource(stream), mute = ac.createGain(); mute.gain.value = 0; mute.connect(ac.destination);
-    const onPCM = f => { if (ses !== s || s.pausado || s.fin) return; s.buf.push(f); s.bufLen += f.length; nivel(f); };
+    const onPCM = f => { if (ses !== s || s.pausado || s.fin) return; s.ultPCM = performance.now(); nivel(f); if (s.local) oir(s, f); else { s.buf.push(f); s.bufLen += f.length; } };
     try {
       await ac.audioWorklet.addModule('vivo-worklet.js');
       const node = new AudioWorkletNode(ac, 'vivo-cap');
@@ -152,12 +321,21 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
       src.connect(sp); sp.connect(mute); s.sp = sp;
     }
     if (ac.state === 'suspended') await ac.resume().catch(() => { });
+    s.ultPCM = performance.now(); s.micErr = ''; s.micListo = true;
   }
   function micStop() {
     if (!ses) return;
     try { ses.stream?.getTracks().forEach(t => t.stop()); } catch (e) { }
     try { ses.ac?.close(); } catch (e) { }
-    ses.stream = null; ses.ac = null;
+    ses.stream = null; ses.ac = null; ses.micListo = false;
+  }
+  const msgMic = e => (e?.name === 'NotAllowedError' ? 'Falta el permiso del micrófono. En el iPad: Ajustes → Safari → Micrófono → Permitir, y vuelve a abrir la app. ' : '') + (e?.message || '');
+  /* vuelve a abrir el micrófono desde un toque (después de una llamada, de cambiar de app o de un corte de audio) */
+  async function reabrirMic() {
+    const s = ses; if (!s || s.fin || s.demo) return;
+    try { estado('Abriendo micrófono…'); micStop(); s.micErr = ''; s.pausado = false; await micStart(); if (ses !== s) return; estado('Escuchando'); wake(); }
+    catch (e) { console.error(e); if (ses !== s) return; s.micErr = msgMic(e) || 'No se pudo abrir el micrófono.'; s.pausado = true; estado('Sin micrófono'); }
+    pintaTop(); saludTic();
   }
   let lvlRaf = 0;
   function nivel(f) {
@@ -171,57 +349,82 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
     });
   }
   async function wake() { try { if (ses && !ses.wl && navigator.wakeLock) { ses.wl = await navigator.wakeLock.request('screen'); ses.wl.addEventListener?.('release', () => { if (ses) ses.wl = null; }); } } catch (e) { } }
-  document.addEventListener('visibilitychange', () => { if (ses && !document.hidden && !ses.fin) { wake(); if (!ses.pausado) ses.ac?.resume?.().catch(() => { }); } });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    if (ses && !ses.fin) { wake(); ses.ultPCM = performance.now(); if (!ses.pausado) ses.ac?.resume?.().catch(() => { }); }
+    else if (!ses) pintarBoton(true);
+  });
+  window.addEventListener('online', () => { if (ses) { ses.sinRed = false; ses.urge = true; ses.despierta?.(); bombear(); saludTic(); } else pintarBoton(true); });
+  window.addEventListener('offline', () => { if (ses) saludTic(); else pintarBoton(true); });
 
   function tic() {
-    if (!ses || ses.fin) return;
+    if (!ses) return;
+    if (ses.fin) return saludTic();
     if (!ses.pausado) { ses.seg++; ses.desde++; }
     const t = $('#vvT'); if (t) t.textContent = mmss(ses.seg);
     if (ses.demo) return;
-    if (!ses.pausado && ses.ac?.state === 'suspended') estado('Toca «Reanudar»');
-    if (!ses.pausado && ses.desde >= cfg.seg) cortar();
+    if (!ses.pausado && ses.ac?.state === 'suspended') { estado('Toca «Reanudar»'); ses.ac.resume().catch(() => { }); }
+    if (!ses.local && !ses.pausado && ses.desde >= cfg.seg) cortar();
+    saludTic();
   }
+  /* cierra el fragmento en curso: con transcripción local, lo que haya de voz; en modo audio, el bloque de tiempo */
   function cortar() {
-    const s = ses, len = s.bufLen, ini = Math.max(0, s.seg - s.desde);
+    const s = ses;
+    if (s.local) return cerrarSeg(s, false);
+    const len = s.bufLen, ini = Math.max(0, s.seg - s.desde);
     s.desde = 0;
     if (!len) return;
     const chunks = s.buf; s.buf = []; s.bufLen = 0;
     const pcm = a16k(chunks, len, s.rate);
     let q = 0, n = 0; for (let i = 0; i < pcm.length; i += 8) { q += pcm[i] * pcm[i]; n++; }
     if (Math.sqrt(q / Math.max(1, n)) / 32768 < 0.0025) { s.stats.sil++; if (!s.enviando) estado('Escuchando (silencio)'); pintaTec(); return; }
-    s.cola.push({ pcm, ini });
+    s.cola.push({ pcm, ini, t0: performance.now() });
     bombear();
   }
+  /* Envía a Gemini lo que haya en la cola, de uno en uno. La cola puede traer renglones de texto (transcritos aquí) o
+     fragmentos de audio (respaldo); se envía de una vez toda la racha del mismo tipo. El texto se agrupa para no pasar
+     de un análisis cada «cfg.cada» segundos (cuida el límite del plan gratuito) y nunca se descarta si falla el envío. */
   async function bombear() {
     const s = ses;
-    if (!s || s.enviando || !s.cola.length) return;
-    s.enviando = true;
-    const lote = s.cola.splice(0); let n = 0; lote.forEach(l => n += l.pcm.length);
-    const pcm = new Int16Array(n); let o = 0; lote.forEach(l => { pcm.set(l.pcm, o); o += l.pcm.length; });
-    const ini = lote[0].ini, t0 = performance.now();
+    if (!s || s.enviando || !s.cola.length || s.cancel) return;
+    const esTxt = s.cola[0].txt !== undefined;
+    if (esTxt && !s.fin && !s.urge) {
+      const falta = cfg.cada * 1000 - (performance.now() - s.ultEnv);
+      if (falta > 0) { if (!s.tEnv) s.tEnv = setTimeout(() => { s.tEnv = 0; if (ses === s) bombear(); }, falta); return; }
+    }
+    s.urge = false; s.enviando = true; s.ultEnv = performance.now();
+    let k = 0; while (k < s.cola.length && (s.cola[k].txt !== undefined) === esTxt) k++;
+    const lote = s.cola.splice(0, k), ini = lote[0].ini, t0 = performance.now();
+    let n = 0, pcm = null, parts;
+    if (esTxt) parts = [{ text: contexto(lote) }];
+    else {
+      lote.forEach(l => n += l.pcm.length);
+      pcm = new Int16Array(n); let o = 0; lote.forEach(l => { pcm.set(l.pcm, o); o += l.pcm.length; });
+      parts = [{ text: contexto() }, { inlineData: { mimeType: 'audio/wav', data: wavB64(pcm) } }];
+    }
     estado('Analizando…');
     try {
-      const d = await gem(`/${encodeURIComponent(cfg.model)}:generateContent`, {
-        systemInstruction: { parts: [{ text: SISTEMA }] },
-        contents: [{ role: 'user', parts: [{ text: contexto() }, { inlineData: { mimeType: 'audio/wav', data: wavB64(pcm) } }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
-      });
+      const d = await generar(esTxt, parts);
       if (ses !== s) return;
       const r = leerJSON(textoDe(d));
       s.stats.n++; s.stats.lat.push((performance.now() - t0) / 1000); s.espera = 0; s.stats.ultErr = '';
-      aplicar(r, ini);
-      estado(s.fin ? 'Consulta finalizada' : s.pausado ? 'En pausa' : 'Escuchando');
+      s.errSeg = 0; s.errCod = 0; s.errClave = false; s.sinRed = false;
+      esTxt ? s.stats.txt++ : s.stats.aud++;
+      aplicar(r, ini, esTxt ? lote : null);
+      estado(s.trCola ? 'Transcribiendo…' : reposo(s));
     } catch (e) {
       console.error(e);
       if (ses !== s) return;
-      s.stats.err++; s.stats.ultErr = e.message;
-      if (n / 16000 <= 150) s.cola.unshift({ pcm, ini }); else s.stats.perdido = (s.stats.perdido || 0) + Math.round(n / 16000);
-      estado(e.code === 429 ? 'Límite de Gemini: reintentando' : 'Sin respuesta: reintentando');
-      pintaTec();
+      s.stats.err++; s.stats.ultErr = e.message; s.errSeg = (s.errSeg || 0) + 1; s.errCod = e.code; s.errClave = !!e.clave; s.sinRed = !!e.red;
+      if (esTxt) s.cola.unshift(...lote);
+      else if (n / 16000 <= 150) s.cola.unshift({ pcm, ini, t0: lote[0].t0 }); else s.stats.perdido = (s.stats.perdido || 0) + Math.round(n / 16000);
+      estado(e.code === 429 ? 'Límite de Gemini: reintentando' : e.red ? 'Sin internet: reintentando' : 'Sin respuesta: reintentando');
+      pintaTec(); saludTic();
       s.espera = Math.min(60, (s.espera || 4) * 2);
       await new Promise(r => { s.despierta = r; setTimeout(r, s.espera * 1000); });
+      s.urge = true;
     } finally {
-      if (ses === s) { s.enviando = false; pintaTec(); if (s.cola.length && !s.cancel) bombear(); }
+      if (ses === s) { s.enviando = false; pintaTec(); if (s.cola.length && !s.cancel) bombear(); else if (!s.trCola) estado(reposo(s)); }
     }
   }
 
@@ -237,12 +440,23 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
       Object.assign(it, { med, ind: ind || it.ind, origen: 'dictado', estado: 'aceptado', ctrl: it.ctrl || ctrl, t: it.t ?? extra.t });
     } else if (it.estado === 'propuesto') Object.assign(it, { med, ind: ind || it.ind, motivo: extra.motivo || it.motivo, ctrl: it.ctrl || ctrl });
   }
-  function aplicar(r, ini) {
+  /* lote: los renglones de texto que se enviaron (transcritos en el iPad). Sus líneas provisionales se cambian por las que
+     devuelve el modelo, ya con quién habla; si el modelo las recorta o no las devuelve, se conservan tal como se oyeron. */
+  function aplicar(r, ini, lote) {
     if (!ses || !r || typeof r !== 'object') return;
-    const lineas = arr(r.transcripcion).map(l => ({ q: QUIEN[l?.quien] ? l.quien : 'desconocido', t: txt(l?.texto), s: ini })).filter(l => l.t);
-    if (!lineas.length) { pintaTec(); return; }             // silencio o ruido: no se toca nada
+    let lineas = arr(r.transcripcion).map(l => ({ q: QUIEN[l?.quien] ? l.quien : 'desconocido', t: txt(l?.texto), s: ini })).filter(l => l.t);
+    if (lote) {
+      const ids = new Set(lote.map(l => l.id)), prov = ses.trans.filter(l => ids.has(l.id)), i0 = ses.trans.findIndex(l => ids.has(l.id));
+      const largo = a => a.reduce((n, l) => n + l.t.length, 0), vacio = !lineas.length;
+      if (vacio || largo(lineas) < largo(prov) * 0.6) lineas = prov.map(l => ({ q: 'desconocido', t: l.t, s: l.s }));
+      ses.trans = ses.trans.filter(l => !ids.has(l.id));
+      ses.trans.splice(i0 < 0 ? ses.trans.length : i0, 0, ...lineas);
+      if (vacio) { pintaTrans(); pintaTec(); return; }       // el modelo no vio conversación real: no se toca la historia
+    } else {
+      if (!lineas.length) { pintaTec(); return; }            // silencio o ruido: no se toca nada
+      ses.trans.push(...lineas);
+    }
     ses.nuevo = {};
-    ses.trans.push(...lineas);
     const h = r.historia || {};
     CAMPOS.forEach(([k]) => { const v = txt(h[k]); if (v && !ses.fijo[k] && v !== ses.h[k]) { ses.h[k] = v; ses.nuevo[k] = 1; } });
     SV.forEach(([k]) => { const v = txt(h.sv?.[k]); if (v && !ses.fijo['sv.' + k] && v !== ses.h.sv[k]) { ses.h.sv[k] = v; ses.nuevo.sv = 1; } });
@@ -270,6 +484,8 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
   async function iniciar() {
     if (ses) return;
     await cargarCfg();
+    await wspAuto();                                                 // deja el modelo de voz cargando mientras se elige al paciente
+    chequeoPrevio().catch(() => { });
     const sh = openSheet(`<div class="shead"><h2>¿Dónde es esta consulta?</h2><button class="iconbtn" data-close aria-label="Cerrar">${IC.x}</button></div>
       <p class="hint" style="margin-bottom:14px">Los pacientes y las notas de cada consultorio se guardan por separado y nunca se mezclan.</p>
       <div class="vv-pick">${Object.entries(AMBITOS).map(([k, a]) => `<button class="vv-big" data-amb="${k}"><b>${esc(a.nombre)}</b><span>${k === AMB ? 'Es el que está abierto ahora' : 'Cambiar a este consultorio'}</span></button>`).join('')}</div>`, { small: true });
@@ -305,6 +521,7 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
         <button class="vv-check" data-c="acomp" aria-pressed="false"><i>${chk}</i>Su acompañante está de acuerdo</button>
         <button class="vv-check" data-c="solo" aria-pressed="false"><i>${chk}</i>Viene sin acompañante</button>
       </div>
+      <div id="vvPre" class="vv-prebox"></div>
       ${sinClave ? '<p class="hint" style="margin-top:12px;color:#8A5A00">Todavía no hay clave de Gemini en este iPad (Ajustes → Consulta en vivo). Sin clave no se puede escuchar; puedes ver una demostración con una consulta ficticia.</p>' : ''}
       <div class="sticky-actions"><button class="btn ghost" data-manual style="margin-right:auto">Consulta sin escucha</button>
         ${sinClave ? '<button class="btn soft" data-demo>Ver demostración</button>' : ''}
@@ -315,6 +532,14 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
     $('[data-manual]', sh).onclick = () => { closeSheet(); openConsulta({ patientId: p.id }); };
     $('[data-demo]', sh) && ($('[data-demo]', sh).onclick = () => { closeSheet(); demo(); });
     $('[data-go]', sh).onclick = () => { closeSheet(); abrir(p, false, { hora: nowTime(), acomp: c.acomp }); };
+    /* resumen de «¿está todo listo?»; se actualiza solo mientras termina de cargar el modelo de voz */
+    const pre = async () => {
+      const caja = $('#vvPre', sh); if (!caja || !caja.isConnected) return WSP.oyentes.delete(pre);
+      const h = await chequeoPrevio().catch(() => null); if (!h || !caja.isConnected) return;
+      const it = h.items.map(i => i.k === 'voz' && i.n === 'ok' && cfg.modo === 'local' && WSP.est === 'cargando' ? { ...i, n: 'info', t: 'Cargando la transcripción en el iPad…', d: 'Puedes empezar ya: mientras termina, se envía el audio.' } : i);
+      caja.innerHTML = `<div class="vv-prehead ${h.n}">${h.n === 'ok' ? IC_OK : IC_AV}<b>${h.n === 'ok' ? 'Todo listo para escuchar' : h.n === 'aviso' ? 'Lista, con un aviso' : 'Falta algo para poder escuchar'}</b></div>${h.n === 'ok' && !it.some(i => i.n === 'info') ? '' : saludHTML(it.filter(i => i.n !== 'ok'))}`;
+    };
+    WSP.oyentes.add(pre); pre();
   }
 
   /* ---------------- sesión ---------------- */
@@ -329,7 +554,10 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
         ago: an.gineco || '', alergias: an.alergicos || '', medicamentos: junta(cr && cr.medicamentos.join(', '), an.tratamiento), estudios: '', exploracion: '', sv: {}
       },
       alarma: '', preguntas: [], explora: [], dx: [], dxSel: '', estudiosSug: [], plan: '', lab: false, img: false, rx: [], indic: '',
-      cola: [], enviando: false, buf: [], bufLen: 0, lvl: 0, stats: { n: 0, err: 0, sil: 0, lat: [], ultErr: '' }
+      cola: [], enviando: false, buf: [], bufLen: 0, lvl: 0, stats: { n: 0, err: 0, sil: 0, lat: [], ultErr: '', tr: [], trErr: 0, txt: 0, aud: 0 },
+      /* local: esta consulta corta por pausas y transcribe en el iPad (si el modelo de voz ya está preparado) */
+      local: !esDemo && localLista(), vad: vadNuevo(), trCola: 0, trHilo: Promise.resolve(), ultEnv: -1e9, tEnv: 0, urge: false,
+      ultPCM: performance.now(), micErr: '', micListo: false, errSeg: 0, errCod: 0, errClave: false, sinRed: false, salud: null, saludF: '', fallaSeg: 0
     };
   }
   async function abrir(p, esDemo, consent) {
@@ -339,26 +567,30 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
     s.timer = setInterval(tic, 1000);
     if (esDemo) { estado('Demostración'); return correrDemo(); }
     estado('Abriendo micrófono…');
+    if (s.local) wspAuto();                                           // normalmente ya está en memoria; si no está disponible, la consulta sigue con audio
     try { await micStart(); if (ses !== s) return; estado('Escuchando'); wake(); }
     catch (e) {
       console.error(e); if (ses !== s) return;
-      s.pausado = true; estado('Sin micrófono'); pintaTop();
-      avisoBox('No se pudo usar el micrófono', (e.name === 'NotAllowedError' ? 'Falta el permiso del micrófono. En el iPad: Ajustes → Safari → Micrófono → Permitir, y vuelve a abrir la app. ' : '') + (e.message || ''));
+      s.pausado = true; s.micErr = msgMic(e) || 'No se pudo abrir el micrófono.'; estado('Sin micrófono'); pintaTop();
+      avisoBox('No se pudo usar el micrófono', msgMic(e));
     }
+    saludTic();
   }
   function cerrar() {
     if (!ses) return;
-    const s = ses; s.cancel = true; s.despierta?.();
+    const s = ses; s.cancel = true; s.despierta?.(); clearTimeout(s.tEnv);
     clearInterval(s.timer); micStop(); try { s.wl?.release(); } catch (e) { }
     (s.demoT || []).forEach(clearTimeout);
     ses = null; $('#vivo').innerHTML = ''; document.body.classList.remove('vv-abierto');
+    pintarBoton(true);
   }
   async function pausa() {
     const s = ses; if (!s || s.fin || s.demo) return;
-    if (!s.ac) { try { s.pausado = false; estado('Abriendo micrófono…'); await micStart(); estado('Escuchando'); wake(); } catch (e) { s.pausado = true; estado('Sin micrófono'); toast('No se pudo abrir el micrófono'); } return pintaTop(); }
-    if (s.pausado || s.ac.state === 'suspended') { s.pausado = false; await s.ac.resume().catch(() => { }); estado('Escuchando'); wake(); }
-    else { cortar(); s.pausado = true; await s.ac.suspend().catch(() => { }); estado('En pausa'); }
-    pintaTop();
+    const pista = s.stream?.getAudioTracks?.()[0];
+    if (!s.ac || s.micErr || !pista || pista.readyState === 'ended') return reabrirMic();      // sin micrófono vivo: se abre de nuevo
+    if (s.pausado || s.ac.state !== 'running') { s.pausado = false; await s.ac.resume().catch(() => { }); s.ultPCM = performance.now(); estado('Escuchando'); wake(); }
+    else { cortar(); s.pausado = true; await s.ac.suspend().catch(() => { }); estado('En pausa'); s.urge = true; bombear(); }
+    pintaTop(); saludTic();
   }
   async function finalizar() {
     const s = ses; if (!s || s.fin) return;
@@ -367,14 +599,16 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
     s.fin = true; s.pausado = true; try { s.wl?.release(); } catch (e) { }
     pintaTop(); pintaCierre();
     if (s.demo) return estado('Demostración terminada');
-    estado(s.cola.length || s.enviando ? 'Procesando lo último…' : 'Consulta finalizada');
-    s.despierta?.(); bombear();
+    estado(reposo(s));
+    s.urge = true; s.despierta?.(); bombear(); saludTic();
   }
   async function volver() {
     const s = ses; if (!s || !s.fin) return;
     s.fin = false; s.pausado = false; pinta(); pintaTop();
     if (s.demo) return estado('Demostración');
-    try { estado('Abriendo micrófono…'); await micStart(); estado('Escuchando'); wake(); } catch (e) { s.pausado = true; estado('Sin micrófono'); pintaTop(); }
+    try { estado('Abriendo micrófono…'); await micStart(); estado('Escuchando'); wake(); }
+    catch (e) { s.pausado = true; s.micErr = msgMic(e) || 'No se pudo abrir el micrófono.'; estado('Sin micrófono'); pintaTop(); }
+    saludTic();
   }
 
   /* ---------------- pantalla ---------------- */
@@ -387,15 +621,131 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
         <div class="vv-pac"><span class="vv-av">${esc(initials(p.nombre))}</span>
           <div class="vv-who"><b>${esc(p.nombre)}</b><span>${[edadTxt(p), sexoTxt(p.sexo)].filter(Boolean).map(esc).join(' · ')}</span><small>${ses.primera ? 'Primera vez' : 'Subsecuente'}${p.expediente ? ' · Exp. ' + esc(p.expediente) : ''}${ses.demo ? ' · Demostración con datos ficticios' : ''}</small></div>
           <span class="vv-amb">${esc(AMBITOS[ses.amb].corto)}</span></div>
-        <div class="vv-rec" id="vvRec" data-e="rec"><i class="dot"></i><span id="vvEstado"></span><span class="vv-lvl" id="vvLvl" aria-hidden="true">${'<i></i>'.repeat(9)}</span><span class="vv-t" id="vvT">00:00</span></div>
+        <div class="vv-recw"><div class="vv-rec" id="vvRec" data-e="rec"><i class="dot"></i><span id="vvEstado"></span><span class="vv-lvl" id="vvLvl" aria-hidden="true">${'<i></i>'.repeat(9)}</span><span class="vv-t" id="vvT">00:00</span></div>
+          ${ses.demo ? '' : '<button class="vv-salud" id="vvSalud" data-act="salud" data-n="ok" aria-live="polite"></button>'}</div>
         <div class="vv-acts" id="vvActs"></div>
       </header>
+      <div id="vvFallo"></div>
       <div id="vvAlarma"></div>
       <div class="vv-body" id="vvBody"></div>
     </div>`;
     $('#vivo').onclick = clic;
-    pintaTop(); pinta();
+    pintaTop(); pinta(); pintaSalud();
   }
+
+  /* ---------------- semáforo: ¿está funcionando todo lo que la consulta en vivo necesita? ---------------- */
+  const IC_OK = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="9" r="7.2"/><path d="M5.8 9.3l2.2 2.2 4.2-4.6"/></svg>';
+  const IC_AV = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2.5 16.5 15h-15L9 2.5Z"/><path d="M9 7.5v3.5M9 13.2v.1"/></svg>';
+  const PESO = { ok: 0, info: 0, aviso: 1, falla: 2 };
+  const resumen = it => { const peor = it.reduce((a, b) => PESO[b.n] > PESO[a.n] ? b : a, { n: 'ok' }); return { n: peor.n === 'info' ? 'ok' : peor.n, t: peor.t || 'Todo en orden', d: peor.d || '', k: peor.k || '', items: it }; };
+  /* estado de cada pieza durante la consulta: micrófono, transcripción, internet, Gemini y pantalla */
+  function salud() {
+    const s = ses, it = [], ahora = performance.now(), pon = (k, n, t, d = '') => it.push({ k, n, t, d });
+    const enIpad = s.local && WSP.est === 'listo';
+    if (!s.fin) {
+      const pista = s.stream?.getAudioTracks?.()[0];
+      if (s.micErr) pon('mic', 'falla', 'Sin micrófono', s.micErr + ' Toca «Reanudar» para intentarlo de nuevo.');
+      else if (s.pausado) pon('mic', 'ok', 'Micrófono en pausa', 'No se escucha nada hasta que toques «Reanudar».');
+      else if (!s.micListo) pon('mic', 'ok', 'Abriendo el micrófono…');
+      else if (s.ac?.state !== 'running' || !pista || pista.readyState === 'ended' || pista.muted || ahora - s.ultPCM > 3000) pon('mic', 'falla', 'El micrófono se detuvo', 'La tableta no está escuchando. Toca «Reanudar».');
+      else pon('mic', 'ok', 'Micrófono escuchando');
+    }
+    if (enIpad) pon('voz', 'ok', 'Transcripción en el iPad', WSP.dev === 'webgpu' ? 'Con aceleración por GPU.' : 'Sin GPU: funciona, pero más lenta.');
+    else if (s.local || cfg.modo === 'local') pon('voz', 'aviso', WSP.est === 'cargando' ? 'Preparando la transcripción en el iPad' : cfg.wlisto[cfg.wmodelo] ? 'Transcripción en el iPad no disponible' : 'Transcripción en el iPad sin preparar',
+      'Mientras tanto se envía el audio a Gemini: funciona, pero responde más lento.' + (WSP.est === 'error' && WSP.err ? ' (' + WSP.err + ')' : !cfg.wlisto[cfg.wmodelo] ? ' Prepárala en Ajustes → Consulta en vivo.' : ''));
+    else pon('voz', 'ok', 'Transcripción por Gemini', 'Se envía el audio (así está elegido en Ajustes).');
+    const viejo = s.cola.length ? (ahora - (s.cola[0].t0 || ahora)) / 1000 : 0;
+    if (!navigator.onLine || s.sinRed) pon('red', 'falla', 'Sin internet', enIpad ? 'Se sigue escuchando y transcribiendo en el iPad: no se pierde nada. La historia y las sugerencias se ponen al día solas cuando vuelva la conexión.' : 'El audio se conserva hasta 2.5 minutos mientras vuelve la conexión; después se pierde lo más antiguo.');
+    else {
+      pon('red', 'ok', 'Internet conectado');
+      if (s.errSeg && s.errCod === 429) pon('gem', 'falla', 'Límite de uso de Gemini', 'Se reintenta solo. ' + (enIpad ? 'La conversación se sigue transcribiendo y no se pierde.' : 'El audio se conserva hasta 2.5 minutos.'));
+      else if (s.errSeg && s.errClave) pon('gem', 'falla', 'La clave de Gemini no es válida', 'Revísala en Ajustes → Consulta en vivo.');
+      else if (s.errSeg >= 2) pon('gem', 'falla', 'Gemini no responde', s.stats.ultErr + '. Se reintenta solo.');
+      else if (s.errSeg === 1) pon('gem', 'aviso', 'Reintentando el análisis', s.stats.ultErr + '.');
+      else if (viejo > 75) pon('gem', 'aviso', 'El análisis va atrasado', 'Hay conversación de hace más de un minuto sin analizar.');
+      else pon('gem', 'ok', s.stats.n ? 'Gemini respondiendo' : 'Gemini listo', s.stats.lat.length ? `Última respuesta en ${s.stats.lat[s.stats.lat.length - 1].toFixed(1)} s.` : '');
+    }
+    if (!s.fin && !s.pausado) pon('pan', s.wl ? 'ok' : 'info', s.wl ? 'Pantalla activa' : 'La pantalla podría bloquearse sola', s.wl ? 'El iPad no se bloqueará durante la consulta.' : 'Si el iPad se bloquea, deja de escuchar. Tócalo de vez en cuando.');
+    return resumen(it);
+  }
+  function pitido() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext, propio = ses?.ac?.state === 'running', ac = propio ? ses.ac : new AC(), t = ac.currentTime + 0.02;
+      [0, 0.24].forEach(d => {
+        const o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = 880;
+        g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.22, t + d + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.17);
+        o.connect(g); g.connect(ac.destination); o.start(t + d); o.stop(t + d + 0.19);
+      });
+      if (!propio) setTimeout(() => ac.close().catch(() => { }), 900);
+    } catch (e) { }
+  }
+  /* se revisa cada segundo; si algo falla más de 5 s seguidos suena un aviso (si está activado) */
+  function saludTic() {
+    const s = ses; if (!s || s.demo) return;
+    const h = salud(), firma = h.n + '|' + h.items.map(i => i.n + i.t).join('|');
+    if (h.n === 'falla') { if (++s.fallaSeg === 6 && cfg.beep && !s.fin) pitido(); }
+    else { if (s.fallaSeg >= 6) toast('Todo en orden otra vez'); s.fallaSeg = 0; }
+    s.salud = h;
+    if (firma !== s.saludF) { s.saludF = firma; pintaSalud(); }
+  }
+  function pintaSalud() {
+    const b = $('#vvSalud'), f = $('#vvFallo'); if (!ses || !b || !f) return;
+    const h = ses.salud || salud();
+    b.dataset.n = h.n; b.innerHTML = (h.n === 'ok' ? IC_OK : IC_AV) + `<span>${esc(h.n === 'ok' ? 'Todo en orden' : h.t)}</span>`;
+    b.setAttribute('aria-label', (h.n === 'ok' ? 'Todo en orden' : h.t) + '. Toca para ver el detalle');
+    f.innerHTML = h.n === 'ok' ? '' : `<div class="vv-fallo ${h.n}" role="${h.n === 'falla' ? 'alert' : 'status'}">${IC_AV}<div><b>${esc(h.t)}</b><span>${esc(h.d)}</span></div>${h.k === 'mic' ? '<button class="vv-btn sm" data-act="micOk">Reanudar</button>' : '<button class="vv-btn sm" data-act="salud">Ver detalle</button>'}</div>`;
+  }
+  function saludHTML(items) {
+    return `<ul class="vv-sal">${items.map(i => `<li class="${i.n}"><i></i><span><b>${esc(i.t)}</b>${i.d ? `<small>${esc(i.d)}</small>` : ''}</span></li>`).join('')}</ul>`;
+  }
+  function verSalud() {
+    const h = ses.salud || salud();
+    const sh = openSheet(`<div class="shead"><h2>${h.n === 'ok' ? 'Todo en orden' : h.n === 'aviso' ? 'Funciona, con un aviso' : 'Algo necesita atención'}</h2><button class="iconbtn" data-close aria-label="Cerrar">${IC.x}</button></div>
+      ${saludHTML(h.items)}
+      <p class="hint" style="margin-top:12px">Este indicador se revisa cada segundo durante la consulta. Verde: todo funciona. Ámbar: funciona con una limitación. Rojo: una parte dejó de funcionar${cfg.beep ? ' (además suena un aviso)' : ''}.</p>
+      <div class="sticky-actions"><button class="btn primary" data-close>Entendido</button></div>`, { small: true });
+    $$('[data-close]', sh).forEach(x => x.onclick = closeSheet);
+  }
+
+  /* ---------------- antes de empezar: ¿está todo listo? (botón de «Hoy» y hoja de consentimiento) ---------------- */
+  const previo = { t: 0, r: null, p: null };
+  async function chequeoPrevio(forzar) {
+    await cargarCfg();
+    if (!forzar && previo.r && Date.now() - previo.t < 120000) return previo.r;
+    if (previo.p) return previo.p;
+    return previo.p = (async () => {
+      const it = [], pon = (k, n, t, d = '') => it.push({ k, n, t, d });
+      if (!navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext)) pon('mic', 'falla', 'Micrófono no disponible', 'Este navegador no permite usar el micrófono desde la app.');
+      else {
+        let est = ''; try { est = (await navigator.permissions?.query({ name: 'microphone' }))?.state || ''; } catch (e) { }
+        if (est === 'denied') pon('mic', 'falla', 'Micrófono sin permiso', 'En el iPad: Ajustes → Safari → Micrófono → Permitir, y vuelve a abrir la app.');
+        else pon('mic', 'ok', 'Micrófono listo', est === 'prompt' ? 'Pedirá permiso al empezar.' : '');
+      }
+      if (cfg.modo !== 'local') pon('voz', 'ok', 'Transcripción por Gemini', 'Se envía el audio (así está elegido en Ajustes).');
+      else if (WSP.est === 'error') pon('voz', 'aviso', 'Transcripción en el iPad con falla', 'Se enviará el audio a Gemini (más lento). ' + WSP.err);
+      else if (cfg.wlisto[cfg.wmodelo] && (WSP.est === 'listo' || await enCache(cfg.wmodelo))) pon('voz', 'ok', 'Transcripción en el iPad lista', cfg.wlisto[cfg.wmodelo] === 'webgpu' ? 'Con aceleración por GPU.' : 'Sin GPU: funciona, pero más lenta.');
+      else pon('voz', 'aviso', 'Transcripción en el iPad sin preparar', 'Se enviará el audio a Gemini (más lento). Prepárala en Ajustes → Consulta en vivo.');
+      if (!cfg.apiKey) pon('gem', 'falla', 'Falta la clave de Gemini', 'Pégala en Ajustes → Consulta en vivo. Sin clave solo se puede ver la demostración.');
+      else if (!navigator.onLine) pon('red', 'falla', 'Sin internet', 'El asistente necesita conexión para analizar la consulta.');
+      else try { await gem('?pageSize=1', null, 8000); pon('red', 'ok', 'Internet conectado'); pon('gem', 'ok', 'Gemini responde'); }
+        catch (e) {
+          if (e.red || e.code === 0) pon('red', 'falla', 'Sin conexión con Gemini', 'Revisa el internet de la tableta.');
+          else { pon('red', 'ok', 'Internet conectado'); pon('gem', e.clave ? 'falla' : 'aviso', e.clave ? 'La clave de Gemini no es válida' : 'Gemini respondió con un aviso', e.message + '.'); }
+        }
+      previo.r = resumen(it); previo.t = Date.now();
+      return previo.r;
+    })().finally(() => { previo.p = null; });
+  }
+  /* pinta el indicador del botón «Iniciar consulta en vivo»: verde listo, ámbar con limitación, rojo no disponible */
+  async function pintarBoton(forzar) {
+    const pon = (n, t, d) => { const b = $('#vivoGo'), e = $('#vivoPre'); if (!b || !e) return; b.dataset.n = n; e.innerHTML = (n === 'ok' ? IC_OK : n === 'espera' ? '<i class="gira"></i>' : IC_AV) + `<span>${esc(t)}</span>`; e.title = d || ''; };
+    if (!$('#vivoPre') || ses) return;
+    if (!previo.r || forzar) pon('espera', 'Comprobando…');
+    try { const h = await chequeoPrevio(forzar); pon(h.n, h.n === 'ok' ? 'Todo listo' : h.t, h.items.filter(i => i.n !== 'ok').map(i => i.t + (i.d ? ': ' + i.d : '')).join(' · ')); }
+    catch (e) { console.error(e); pon('aviso', 'No se pudo comprobar'); }
+  }
+  setInterval(() => { if (!ses && !document.hidden && $('#vivoPre')) pintarBoton(Date.now() - previo.t > 120000); }, 30000);
+  WSP.oyentes.add(() => { if (ses) saludTic(); });
   function pintaTop() {
     const a = $('#vvActs'); if (!a || !ses) return;
     a.innerHTML = ses.fin
@@ -411,14 +761,23 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
 
   function pintaLineas() {
     return `<div class="vv-h"><span>Transcripción en vivo</span></div>
-      <div class="vv-lines" id="vvLines">${ses.trans.length ? ses.trans.slice(-40).map(l => `<div class="ln q-${l.q}"><b>${QUIEN[l.q]} <small>${mmss(l.s)}</small></b><p>${esc(l.t)}</p></div>`).join('') : `<div class="vv-vacio">${ses.demo ? 'Empieza la demostración…' : 'Empiecen a conversar. Lo que se diga aparecerá aquí unos segundos después.'}</div>`}</div>
+      <div class="vv-lines" id="vvLines">${ses.trans.length ? ses.trans.slice(-40).map(l => `<div class="ln q-${l.q}${l.prov ? ' prov' : ''}"><b>${l.prov ? 'Recién oído' : QUIEN[l.q]} <small>${mmss(l.s)}</small></b><p>${esc(l.t)}</p></div>`).join('') : `<div class="vv-vacio">${ses.demo ? 'Empieza la demostración…' : 'Empiecen a conversar. Lo que se diga aparecerá aquí unos segundos después.'}</div>`}</div>
       <div class="vv-foot" id="vvTec"></div>`;
+  }
+  /* solo la columna de transcripción (para mostrar lo recién oído sin redibujar toda la pantalla) */
+  function pintaTrans() {
+    if (!ses || ses.fin) return;
+    const c = $('.vv-trans'); if (!c) return;
+    c.innerHTML = pintaLineas();
+    const l = $('#vvLines'); if (l) l.scrollTop = l.scrollHeight;
+    pintaTec();
   }
   function pintaTec() {
     const e = $('#vvTec'); if (!e || !ses) return;
-    const s = ses.stats, prom = s.lat.length ? (s.lat.reduce((a, b) => a + b, 0) / s.lat.length).toFixed(1) : '';
+    const s = ses.stats, med = a => a.length ? (a.reduce((x, y) => x + y, 0) / a.length).toFixed(1) : '';
+    const prom = med(s.lat), tr = med(s.tr), enIpad = ses.local && WSP.est === 'listo';
     e.innerHTML = ses.demo ? 'Demostración: no se usa el micrófono ni internet.'
-      : `<span>El audio no se guarda, solo el texto.</span><span class="tec">${s.n} fragmentos${prom ? ` · respuesta ${prom} s` : ''}${s.sil ? ` · ${s.sil} en silencio` : ''}${s.err ? ` · ${s.err} reintentos` : ''}${s.perdido ? ` · ${s.perdido} s sin analizar` : ''}</span>${s.ultErr ? `<span class="err">${esc(s.ultErr)}</span>` : ''}`;
+      : `<span>${enIpad ? 'El audio no sale del iPad: aquí se transcribe y solo se envía el texto.' : 'El audio no se guarda, solo el texto.'}</span><span class="tec">${s.tr.length ? `${s.tr.length} ${s.tr.length === 1 ? 'fragmento transcrito' : 'fragmentos transcritos'} aquí${tr ? ` (${tr} s)` : ''} · ` : ''}${s.n} análisis${prom ? ` · respuesta ${prom} s` : ''}${s.aud && s.tr.length ? ` · ${s.aud} con audio` : ''}${s.sil ? ` · ${s.sil} en silencio` : ''}${s.err ? ` · ${s.err} reintentos` : ''}${s.trErr ? ` · ${s.trErr} fallas de transcripción` : ''}${s.perdido ? ` · ${s.perdido} s sin analizar` : ''}</span>${s.ultErr ? `<span class="err">${esc(s.ultErr)}</span>` : ''}`;
   }
   function pintaHistoria() {
     return `<div class="vv-chead">${tabs()}<div class="vv-leg"><span><i class="ok"></i>Listo</span><span><i class="duda"></i>Por confirmar</span><span><i></i>Falta</span></div></div>
@@ -574,6 +933,8 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
     const a = b.dataset.act, k = b.dataset.k, rx = b.dataset.id && ses.rx.find(r => r.id === b.dataset.id);
     if (a === 'tab') { ses.tab = b.dataset.v; if (ses.tab === 'receta') delete ses.nuevo.rx; pinta(); }
     else if (a === 'pausa') pausa();
+    else if (a === 'salud') verSalud();
+    else if (a === 'micOk') reabrirMic();
     else if (a === 'fin') finalizar();
     else if (a === 'volver') volver();
     else if (a === 'guardar') guardar();
@@ -607,7 +968,7 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
   async function guardar() {
     const s = ses;
     if (s.demo) return cerrar();
-    if ((s.enviando || s.cola.length) && !await confirmBox('Todavía se está analizando el último fragmento de audio. Si guardas ahora, lo último que se dijo puede no quedar en la nota.', { ok: 'Guardar de todos modos', title: 'Falta el último fragmento' })) return;
+    if (pend(s) && !await confirmBox((!navigator.onLine || s.sinRed ? 'No hay internet, así que lo último que se dijo no se ha podido analizar. ' : 'Todavía se está analizando lo último que se dijo. ') + 'Si guardas ahora, puede no quedar en la nota.', { ok: 'Guardar de todos modos', title: 'Falta lo último' })) return;
     if (ses !== s) return;
     const h = s.h, ok = s.rx.filter(r => r.estado === 'aceptado');
     const pre = {
@@ -615,7 +976,7 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
       sv: { ...h.sv, talla: h.sv.talla ? tallaM(h.sv.talla).toFixed(2) : '' }, exploracion: h.exploracion || '', dxIssste: s.dxSel || '',
       plan: [s.plan && endDot(cap(s.plan)), ok.length && 'Tratamiento: ' + ok.map(r => r.med + (r.ind ? ', ' + lcFirst(noDot(r.ind)) : '')).join('; ') + '.', s.indic && 'Indicaciones: ' + endDot(lcFirst(s.indic))].filter(Boolean).join(' '),
       lab: !!s.lab, img: !!s.img, meds: ok.length,
-      vivo: { h: JSON.parse(JSON.stringify(h)), rx: ok.map(r => ({ med: r.med, ind: r.ind, ctrl: !!r.ctrl })), indic: s.indic, consent: s.consent, dur: s.seg, modelo: cfg.model }
+      vivo: { h: JSON.parse(JSON.stringify(h)), rx: ok.map(r => ({ med: r.med, ind: r.ind, ctrl: !!r.ctrl })), indic: s.indic, consent: s.consent, dur: s.seg, modelo: cfg.model, voz: s.stats.tr.length ? 'whisper-' + WSP.modelo : 'gemini' }
     };
     const pid = s.p.id; cerrar();
     openConsulta({ patientId: pid, prefill: pre });
@@ -701,25 +1062,86 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
 
   /* ---------------- tarjeta de Ajustes ---------------- */
   function ajustesHTML() {
+    const seg = (id, ops) => `<div class="seg" id="${id}">${ops.map(([v, t]) => `<button type="button" data-v="${v}">${t}</button>`).join('')}</div>`;
     return `<section class="card milk"><h2 style="margin-bottom:6px">Consulta en vivo (asistente)</h2>
-      <p class="hint" style="margin-bottom:14px">La tableta envía el audio de la consulta a Gemini por fragmentos para transcribir y proponer; el audio no se guarda. La clave vive solo en este iPad, sirve para los dos consultorios y no viaja en los respaldos. <b>Con la clave gratuita usa solo consultas simuladas</b>: Google puede usar ese contenido para mejorar sus productos.</p>
+      <p class="hint" style="margin-bottom:14px">La tableta transcribe la consulta aquí mismo y a Gemini solo le envía el texto para llenar la historia y proponer: el audio no sale del iPad ni se guarda. Si la transcripción en el iPad no está preparada o falla, se envía el audio a Gemini (funciona, pero más lento). La clave vive solo en este iPad, sirve para los dos consultorios y no viaja en los respaldos. <b>Con la clave gratuita usa solo consultas simuladas</b>: Google puede usar ese contenido para mejorar sus productos.</p>
       <div class="form">
         <div class="f s8"><label for="vvKey">Clave de Gemini (API key de Google AI Studio)</label><input id="vvKey" type="password" autocomplete="off" placeholder="Pega aquí la clave"></div>
-        <div class="f s4"><span class="lbl">Fragmento de audio</span><div class="seg" id="vvSeg"><button type="button" data-v="15">15 s</button><button type="button" data-v="20">20 s</button><button type="button" data-v="30">30 s</button></div></div>
-        <div class="f s8"><label for="vvModel">Modelo</label><div class="row"><input id="vvModel" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" style="flex:1;min-width:0"><button type="button" class="btn soft" id="vvModels">Ver modelos</button></div><div class="chips" id="vvList" style="margin-top:8px"></div></div>
         <div class="f s4"><span class="lbl">Pruebas</span><div class="row wrap"><button type="button" class="btn primary" id="vvTest">Probar conexión</button><button type="button" class="btn soft" id="vvDemo">Ver demostración</button></div></div>
-      </div><p class="hint" id="vvMsg" style="margin-top:10px" role="status"></p></section>`;
+        <div class="f s8"><label for="vvModel">Modelo de Gemini</label><div class="row"><input id="vvModel" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" style="flex:1;min-width:0"><button type="button" class="btn soft" id="vvModels">Ver modelos</button></div><div class="chips" id="vvList" style="margin-top:8px"></div></div>
+        <div class="f s4"><span class="lbl">Respuesta de Gemini</span>${seg('vvRap', [['1', 'Rápida'], ['0', 'Más razonada']])}</div>
+      </div><p class="hint" id="vvMsg" style="margin:10px 0 18px" role="status"></p>
+      <h3 style="margin:0 0 6px;font-size:17px">Transcripción de la voz</h3>
+      <p class="hint" style="margin-bottom:14px">«En el iPad» usa un modelo de voz (Whisper) que se descarga una sola vez con internet y después funciona sin conexión. «Rápido» pesa menos y responde antes; «Preciso» entiende mejor el español, pero pesa unas tres veces más. Prepara el que elijas y pruébalo con tu voz.</p>
+      <div class="form">
+        <div class="f s6"><span class="lbl">Dónde se transcribe</span>${seg('vvModo', [['local', 'En el iPad'], ['audio', 'Enviar audio a Gemini']])}</div>
+        <div class="f s6"><span class="lbl">Modelo de voz del iPad</span>${seg('vvWm', [['base', 'Rápido'], ['small', 'Preciso']])}</div>
+        <div class="f"><div class="row wrap"><button type="button" class="btn primary" id="vvPrep">Preparar transcripción</button><button type="button" class="btn soft" id="vvOir">Probar con mi voz (5 s)</button></div>
+          <div class="vv-barra" id="vvBarra" hidden><i></i></div><p class="hint" id="vvWmsg" style="margin-top:8px" role="status"></p></div>
+        <div class="f s4"><span class="lbl">Analizar con Gemini cada</span>${seg('vvCada', [['10', '10 s'], ['20', '20 s'], ['40', '40 s']])}</div>
+        <div class="f s4"><span class="lbl">Fragmento máximo de voz</span>${seg('vvSeg', [['15', '15 s'], ['20', '20 s'], ['30', '30 s']])}</div>
+        <div class="f s4"><span class="lbl">Aviso sonoro si algo falla</span>${seg('vvBeep', [['1', 'Sí'], ['0', 'No']])}</div>
+      </div>
+      <p class="hint" style="margin-top:10px">Analizar más seguido da sugerencias más pronto, pero gasta más solicitudes del plan gratuito de Gemini. Lo que se va oyendo aparece en pantalla de inmediato en cualquier caso.</p></section>`;
+  }
+  /* graba unos segundos del micrófono y los transcribe en el iPad: sirve para comprobar que el modelo de voz funciona y qué tan rápido */
+  async function probarVoz(msg) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC || !navigator.mediaDevices?.getUserMedia) throw new Error('Este navegador no permite usar el micrófono desde la app');
+    const ac = new AC(); ac.resume?.().catch(() => { });                 // dentro del toque (requisito de Safari)
+    let stream;
+    try {
+      await wspCargar();
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      const src = ac.createMediaStreamSource(stream), sp = ac.createScriptProcessor(4096, 1, 1), mute = ac.createGain(), bufs = []; let len = 0;
+      mute.gain.value = 0; sp.onaudioprocess = ev => { const f = new Float32Array(ev.inputBuffer.getChannelData(0)); bufs.push(f); len += f.length; };
+      src.connect(sp); sp.connect(mute); mute.connect(ac.destination);
+      if (ac.state === 'suspended') await ac.resume().catch(() => { });
+      for (let i = 5; i > 0; i--) { msg(`Habla ahora, como en una consulta… ${i}`); await new Promise(r => setTimeout(r, 1000)); }
+      sp.disconnect(); src.disconnect();
+      if (!len) throw new Error('El micrófono no entregó audio');
+      const pcm = a16k(bufs, len, ac.sampleRate), f = Float32Array.from(pcm, v => v / 32768);
+      msg('Transcribiendo…');
+      const t0 = performance.now(), m = await wspTr(f), t = limpia(m.texto);
+      msg(`${t ? `Se entendió: «${t}»` : 'No se detectó voz (habla más cerca del iPad e inténtalo de nuevo)'} · tardó ${((performance.now() - t0) / 1000).toFixed(1)} s ${WSP.dev === 'webgpu' ? 'con GPU' : 'sin GPU'}.`);
+    } finally { try { stream?.getTracks().forEach(t => t.stop()); } catch (e) { } ac.close().catch(() => { }); }
   }
   async function ajustesBind() {
     await cargarCfg();
-    const key = $('#vvKey'), mod = $('#vvModel'), seg = $('#vvSeg'), msg = t => { const m = $('#vvMsg'); if (m) m.textContent = t; };
+    const key = $('#vvKey'), mod = $('#vvModel'), msg = t => { const m = $('#vvMsg'); if (m) m.textContent = t; };
     if (!key) return;
     key.value = cfg.apiKey; mod.value = cfg.model;
-    const pSeg = () => $$('button', seg).forEach(b => b.classList.toggle('on', +b.dataset.v === +cfg.seg));
-    pSeg();
-    key.oninput = () => { cfg.apiKey = key.value.trim(); guardarCfg(); };
+    /* controles de opción: [id, valor actual, al elegir] */
+    const segs = [['vvSeg', () => cfg.seg, v => cfg.seg = +v], ['vvCada', () => cfg.cada, v => cfg.cada = +v], ['vvRap', () => +cfg.rapido, v => cfg.rapido = v === '1'],
+      ['vvBeep', () => +cfg.beep, v => cfg.beep = v === '1'], ['vvModo', () => cfg.modo, v => cfg.modo = v], ['vvWm', () => cfg.wmodelo, v => cfg.wmodelo = v]];
+    const pSeg = () => segs.forEach(([id, get]) => $$(`#${id} button`).forEach(b => b.classList.toggle('on', b.dataset.v === String(get()))));
+    segs.forEach(([id, , set]) => $$(`#${id} button`).forEach(b => b.onclick = () => { set(b.dataset.v); guardarCfg(); previo.t = 0; pSeg(); pVoz(); }));
+    /* estado del modelo de voz; se refresca solo mientras descarga */
+    let nota = '';
+    const pVoz = () => {
+      const m = $('#vvWmsg'), barra = $('#vvBarra'); if (!m) return WSP.oyentes.delete(pVoz);
+      const mo = cfg.wmodelo, nom = mo === 'base' ? 'Rápido' : 'Preciso', gpu = 'gpu' in navigator, tot = TAM[mo][gpu ? 'webgpu' : 'wasm'], cargandoEste = WSP.est === 'cargando' && WSP.cargando === mo;
+      const mb = Math.round(WSP.bytes / 1048576), dev = d => d === 'webgpu' ? 'con aceleración por GPU' : 'con el procesador (sin GPU: más lenta)';
+      barra.hidden = !cargandoEste; if (cargandoEste) barra.firstElementChild.style.width = Math.min(100, Math.round(mb / tot * 100)) + '%';
+      $('#vvPrep').disabled = cargandoEste; $('#vvOir').disabled = WSP.est === 'cargando';
+      m.textContent = cfg.modo !== 'local' ? 'Ahora se envía el audio a Gemini. Elige «En el iPad» para transcribir aquí y enviar solo texto.'
+        : cargandoEste ? (mb ? `Descargando el modelo de voz «${nom}»: ${mb} de unos ${tot} MB. No cierres la app.` : `Cargando el modelo de voz «${nom}»…`)
+        : WSP.est === 'listo' && WSP.modelo === mo ? `Lista: modelo «${nom}» ${dev(WSP.dev)}.${nota ? ' ' + nota : ''}`
+        : WSP.est === 'error' ? `No se pudo preparar: ${WSP.err}. Mientras tanto la consulta envía el audio a Gemini.`
+        : cfg.wlisto[mo] ? `Preparada en este iPad: modelo «${nom}» ${dev(cfg.wlisto[mo])}. Se carga sola al iniciar una consulta.`
+        : `Sin preparar: el modelo «${nom}» descarga unos ${tot} MB una sola vez. Hazlo con buen internet; hasta entonces la consulta envía el audio a Gemini.`;
+    };
+    WSP.oyentes.add(pVoz);
+    $('#vvPrep').onclick = () => { nota = ''; wspCargar().catch(e => console.error(e)); };
+    $('#vvOir').onclick = async () => {
+      nota = ''; const b = $('#vvOir'); b.disabled = true;
+      try { await probarVoz(t => { nota = t; const m = $('#vvWmsg'); if (m && WSP.est === 'listo') m.textContent = t; }); }
+      catch (e) { console.error(e); nota = ''; const m = $('#vvWmsg'); if (m && WSP.est !== 'error') m.textContent = 'No se pudo probar: ' + (e.name === 'NotAllowedError' ? 'falta el permiso del micrófono' : e.message) + '.'; }
+      finally { if (b.isConnected) b.disabled = WSP.est === 'cargando'; }
+    };
+    pSeg(); pVoz();
+    key.oninput = () => { cfg.apiKey = key.value.trim(); guardarCfg(); previo.t = 0; };
     mod.oninput = () => { cfg.model = mod.value.trim().replace(/^models\//, ''); guardarCfg(); };
-    $$('button', seg).forEach(b => b.onclick = () => { cfg.seg = +b.dataset.v; guardarCfg(); pSeg(); });
     $('#vvDemo').onclick = () => demo();
     $('#vvTest').onclick = async () => {
       if (!cfg.apiKey) return msg('Primero pega la clave de Gemini.');
@@ -740,5 +1162,5 @@ Escucha el audio adjunto (el siguiente fragmento de la consulta) y devuelve el J
     };
   }
 
-  return { MIC, iniciar, demo, ajustesHTML, ajustesBind, recetaDeConsulta, aplicarAntecedentes, _t: { get ses() { return ses; }, cfg, cargarCfg, aplicar, a16k, wavB64 } };
+  return { MIC, iniciar, demo, ajustesHTML, ajustesBind, recetaDeConsulta, aplicarAntecedentes, pintarBoton, _t: { get ses() { return ses; }, cfg, cargarCfg, aplicar, a16k, wavB64, WSP, wspCargar, limpia, salud, chequeoPrevio, previo } };
 })();

@@ -545,7 +545,7 @@ function viewHoy() {
     </button>
   </section>
   ${needBackup ? `<div class="glass card row between wrap" style="margin-bottom:20px"><div><b>Haz tu respaldo semanal</b><div class="small" style="opacity:.85">Los datos viven solo en este iPad. Un respaldo te protege si se borra el navegador.</div></div><button class="btn white" id="bk">${IC.down} Guardar respaldo</button></div>` : ''}
-  <button class="vivocta glass" id="vivoGo"><span class="mic">${Vivo.MIC}</span><span class="txt"><b>Iniciar consulta en vivo</b><span>La tableta escucha, llena la historia clínica y propone preguntas, exploración y receta.</span></span>${IC.back.replace('<svg', '<svg style="transform:rotate(180deg)"')}</button>
+  <button class="vivocta glass" id="vivoGo"><span class="mic">${Vivo.MIC}</span><span class="txt"><b>Iniciar consulta en vivo</b><span>La tableta escucha, llena la historia clínica y propone preguntas, exploración y receta.</span></span><span class="vv-pre" id="vivoPre" role="status"></span>${IC.back.replace('<svg', '<svg style="transform:rotate(180deg)"')}</button>
   <div class="grid2">
     <section class="card milk">
       <div class="row between" style="margin-bottom:14px"><h2>Agregar consulta</h2>
@@ -570,6 +570,7 @@ function viewHoy() {
   $('#goEpi').onclick = () => { R.tab = 'epi'; R.epiY = ep.year; R.epiW = ep.week; go('#/reportes'); };
   $('#ambHoy').onclick = elegirAmbito;
   $('#vivoGo').onclick = () => Vivo.iniciar();
+  Vivo.pintarBoton();
   $('#nuevoPac').onclick = () => openPacienteForm({ thenConsulta: true });
   $('#bk') && ($('#bk').onclick = exportBackup);
   $$('[data-consulta]').forEach(v => { const f = () => openConsulta({ id: v.dataset.consulta }); v.onclick = f; v.onkeydown = e => e.key === 'Enter' && f(); });

@@ -85,6 +85,13 @@ const Store = {
   async set(k, v) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); }); }
 };
 
+/* ---------------- consultorios: dos espacios de datos que nunca se mezclan ---------------- */
+const AMBITOS = {
+  issste: { key: 'db', nombre: 'ISSSTE', corto: 'ISSSTE' },
+  particular: { key: 'db-particular', nombre: 'Consultorio particular', corto: 'Particular' }
+};
+let AMB = 'issste';
+
 const EXPLORACION_NORMAL = 'Paciente llega por su propio pie, consciente, orientad@, Glasgow 15 puntos, pupilas isocóricas normorreflécticas, con pulsos carotídeos presentes, sin ingurgitación yugular, cardiorrespiratorio sin compromiso, abdomen blando, depresible, no doloroso, con peristalsis presente, extremidades íntegras, simétricas, fuerza conservada, llenado capilar de 2 seg.';
 
 function defaults() {
@@ -98,7 +105,8 @@ function defaults() {
       unidadReceptora: 'HOSPITAL GENERAL ISSSTE GUANAJUATO', claveReceptora: '',
       motivo: 'NO CONTAMOS CON EL SERVICIO', servicio: 'MEDICINA INTERNA',
       decada: 'estandar', exploracionNormal: EXPLORACION_NORMAL,
-      tipos: Array(10).fill(''), pinHash: '', logo: '', lastBackup: '', saludo: 'Dra. Nancy'
+      tipos: Array(10).fill(''), pinHash: '', logo: '', lastBackup: '', saludo: 'Dra. Nancy',
+      recTitulo: 'Médico Cirujano y Partero', recUniversidad: '', recDireccion: '', recTelefono: ''
     },
     patients: [], consultas: [], referencias: [],
     suive: (window.SUIVE_BASE || []).map(([clave, nombre, grupo]) => ({ id: uid(), clave, nombre, grupo, fav: false, activo: true }))
@@ -109,7 +117,7 @@ let S = null;
 let saveTimer = null;
 function save(now) {
   clearTimeout(saveTimer);
-  const run = () => Store.set('db', S).catch(e => toast('No se pudo guardar: ' + e.message));
+  const run = () => Store.set(AMBITOS[AMB].key, S).catch(e => toast('No se pudo guardar: ' + e.message));
   if (now) return run();
   saveTimer = setTimeout(run, 250);
 }
@@ -445,6 +453,7 @@ const view = () => $('#view');
 function go(h) { if (location.hash !== h) location.hash = h; else render(); }
 function route() { const [, name = 'hoy', a, b] = location.hash.split('/'); return { name, a, b }; }
 function render() {
+  pintarAmbito();
   const r = route();
   $$('.navbtn').forEach(b => b.classList.toggle('on', b.dataset.nav === (r.name === 'paciente' || r.name === 'referencia' ? 'pacientes' : r.name)));
   const V = { hoy: viewHoy, pacientes: viewPacientes, paciente: viewPaciente, reportes: viewReportes, ajustes: viewAjustes, referencia: viewReferencia }[r.name] || viewHoy;
@@ -453,6 +462,48 @@ function render() {
 }
 window.addEventListener('hashchange', render);
 document.addEventListener('click', e => { const n = e.target.closest('[data-nav]'); if (n) go('#/' + n.dataset.nav); });
+
+/* ---------------- consultorio activo ---------------- */
+const dxLbl = () => AMB === 'particular' ? 'Diagnóstico' : 'Diagnóstico ISSSTE';
+function pintarAmbito() {
+  document.body.dataset.amb = AMB;
+  const b = $('#ambitoBtn');
+  if (b) b.innerHTML = `<small>Consultorio</small>${esc(AMBITOS[AMB].corto)}`;
+}
+function nuevoEspacio(prev) {
+  const d = defaults();
+  ['medico', 'cedula', 'saludo', 'pinHash', 'exploracionNormal', 'decada', 'recTitulo', 'recUniversidad', 'recDireccion', 'recTelefono'].forEach(k => { if (prev?.[k] !== undefined) d.settings[k] = prev[k]; });
+  return d;
+}
+async function cambiarAmbito(a) {
+  if (a === AMB || !AMBITOS[a]) return;
+  await save(true);
+  const prev = S.settings;
+  let d = null;
+  try { d = await Store.get(AMBITOS[a].key); } catch (e) { console.error(e); }
+  AMB = a;
+  S = migrate(d || nuevoEspacio(prev));
+  S.ambito = a;
+  try { await Store.set('ambito', a); } catch (e) { console.error(e); }
+  await save(true);
+  pintarAmbito();
+  toast('Consultorio: ' + AMBITOS[a].nombre);
+}
+function elegirAmbito() {
+  const sh = openSheet(`<div class="shead"><h2>Cambiar de consultorio</h2><button class="iconbtn" data-close aria-label="Cerrar">${IC.x}</button></div>
+    <p class="hint" style="margin-bottom:14px">Cada consultorio tiene sus propios pacientes, consultas, reportes y respaldo. Nada se mezcla.</p>
+    <div class="vv-pick">${Object.entries(AMBITOS).map(([k, a]) => `<button class="vv-big ${k === AMB ? 'on' : ''}" data-amb="${k}"><b>${esc(a.nombre)}</b><span>${k === AMB ? 'Abierto ahora' : 'Cambiar a este consultorio'}</span></button>`).join('')}</div>`, { small: true });
+  $('[data-close]', sh).onclick = closeSheet;
+  $$('[data-amb]', sh).forEach(b => b.onclick = async () => { closeSheet(); await cambiarAmbito(b.dataset.amb); go('#/hoy'); render(); });
+}
+/* el PIN es uno solo para los dos consultorios */
+async function syncPin() {
+  for (const [a, info] of Object.entries(AMBITOS)) {
+    if (a === AMB) continue;
+    try { const d = await Store.get(info.key); if (d?.settings) { d.settings.pinHash = S.settings.pinHash; await Store.set(info.key, d); } } catch (e) { console.error(e); }
+  }
+}
+document.addEventListener('click', e => { if (e.target.closest('#ambitoBtn')) elegirAmbito(); });
 
 const vhead = (title, sub = '', acts = '') => `<div class="vhead"><div><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ''}</div><div class="row wrap">${acts}</div></div>`;
 
@@ -473,6 +524,7 @@ function viewHoy() {
   view().innerHTML = `
   <section class="greet">
     <h1 class="hola">Hola, ${esc(S.settings.saludo || 'Dra. Nancy')}</h1>
+    <div class="ambrow"><span>Estás en</span><button class="ambchip" id="ambHoy"><b>${esc(AMBITOS[AMB].nombre)}</b> · Cambiar</button></div>
     ${frases.length ? `<div class="frase glass"><span class="comilla" aria-hidden="true">“</span><p id="frase">${esc(fraseDe(fraseExtra))}</p>
       <button class="iconbtn" id="otraFrase" aria-label="Ver otra frase" title="Otra frase">${IC.refresh}</button></div>` : ''}
   </section>
@@ -493,6 +545,7 @@ function viewHoy() {
     </button>
   </section>
   ${needBackup ? `<div class="glass card row between wrap" style="margin-bottom:20px"><div><b>Haz tu respaldo semanal</b><div class="small" style="opacity:.85">Los datos viven solo en este iPad. Un respaldo te protege si se borra el navegador.</div></div><button class="btn white" id="bk">${IC.down} Guardar respaldo</button></div>` : ''}
+  <button class="vivocta glass" id="vivoGo"><span class="mic">${Vivo.MIC}</span><span class="txt"><b>Iniciar consulta en vivo</b><span>La tableta escucha, llena la historia clínica y propone preguntas, exploración y receta.</span></span>${IC.back.replace('<svg', '<svg style="transform:rotate(180deg)"')}</button>
   <div class="grid2">
     <section class="card milk">
       <div class="row between" style="margin-bottom:14px"><h2>Agregar consulta</h2>
@@ -515,6 +568,8 @@ function viewHoy() {
     fraseExtra++; const el = $('#frase'); el.classList.remove('nueva'); void el.offsetWidth; el.textContent = fraseDe(fraseExtra); el.classList.add('nueva');
   });
   $('#goEpi').onclick = () => { R.tab = 'epi'; R.epiY = ep.year; R.epiW = ep.week; go('#/reportes'); };
+  $('#ambHoy').onclick = elegirAmbito;
+  $('#vivoGo').onclick = () => Vivo.iniciar();
   $('#nuevoPac').onclick = () => openPacienteForm({ thenConsulta: true });
   $('#bk') && ($('#bk').onclick = exportBackup);
   $$('[data-consulta]').forEach(v => { const f = () => openConsulta({ id: v.dataset.consulta }); v.onclick = f; v.onkeydown = e => e.key === 'Enter' && f(); });
@@ -533,7 +588,8 @@ function viewHoy() {
   q.addEventListener('input', draw);
   q.addEventListener('keydown', e => { if (e.key === 'Enter') { const f = $('.res', res); f && f.click(); } });
 }
-const porRevisar = p => !!(p.fnacAprox || !p.fnac || !p.sexo || p.tipo === '' || p.tipo === undefined || !p.expediente);
+const porRevisar = p => AMB === 'particular' ? !!(p.fnacAprox || !p.fnac || !p.sexo)
+  : !!(p.fnacAprox || !p.fnac || !p.sexo || p.tipo === '' || p.tipo === undefined || !p.expediente);
 function resRow(p) {
   const last = consultasDe(p.id)[0];
   return `<button class="res" data-pid="${p.id}"><span class="avatar ${p.sexo === 'F' ? 'f' : 'm'}">${esc(initials(p.nombre))}</span>
@@ -568,18 +624,18 @@ function viewPacientes() {
 /* =========================================================================
    FORMULARIO DE PACIENTE
    ========================================================================= */
-function openPacienteForm({ id, prefill = {}, thenConsulta = false }) {
+function openPacienteForm({ id, prefill = {}, thenConsulta = false, onSaved = null }) {
   const orig = id ? pat(id) : null;
   const d = orig ? JSON.parse(JSON.stringify(orig)) : { id: uid(), nombre: '', expediente: '', fnac: '', sexo: '', tipo: '', tel: '', domicilio: '', antecedentes: {}, createdAt: new Date().toISOString(), ...prefill };
   const sh = openSheet(`
     <div class="shead"><h2>${orig ? 'Editar paciente' : 'Paciente nuevo'}</h2><button class="iconbtn" data-close aria-label="Cerrar">${IC.x}</button></div>
     <div class="form">
       <div class="f s8"><label for="pn">Nombre completo</label><input id="pn" type="text" data-b="nombre" autocapitalize="characters" placeholder="Apellidos y nombre(s)"></div>
-      <div class="f s4"><label for="pe">No. de expediente / derechohabiente</label><input id="pe" type="text" data-b="expediente" autocapitalize="characters"></div>
+      <div class="f s4"><label for="pe">${AMB === 'particular' ? 'No. de expediente (opcional)' : 'No. de expediente / derechohabiente'}</label><input id="pe" type="text" data-b="expediente" autocapitalize="characters"></div>
       <div class="f s4"><label for="pf">Fecha de nacimiento</label><input id="pf" type="date" data-b="fnac" max="${iso(new Date())}"><p class="hint" id="fnacHint" style="color:var(--teal-ink)"></p></div>
       <div class="f s4"><span class="lbl">Sexo</span><div class="seg" data-seg="sexo"><button data-v="M">Masculino</button><button data-v="F">Femenino</button></div></div>
       <div class="f s4"><span class="lbl">Edad</span><div id="edadv" style="font-size:22px;font-weight:600;padding-top:6px">—</div></div>
-      <div class="f"><span class="lbl">Tipo de derechohabiente</span>${segDigits('tipo')}<p class="hint" id="tipolbl"></p></div>
+      <div class="f${AMB === 'particular' ? ' hide' : ''}"><span class="lbl">Tipo de derechohabiente</span>${segDigits('tipo')}<p class="hint" id="tipolbl"></p></div>
       <div class="f s4"><label for="pt">Teléfono</label><input id="pt" type="tel" data-b="tel" inputmode="tel"></div>
       <div class="f s8"><label for="pd">Domicilio</label><input id="pd" type="text" data-b="domicilio" autocapitalize="characters"></div>
     </div>
@@ -587,7 +643,7 @@ function openPacienteForm({ id, prefill = {}, thenConsulta = false }) {
     <div class="sticky-actions">
       ${orig ? `<button class="btn danger" data-del style="margin-right:auto">${IC.trash} Eliminar paciente</button>` : ''}
       <button class="btn ghost" data-close>Cancelar</button>
-      <button class="btn primary" data-save>${thenConsulta ? 'Guardar y abrir consulta' : 'Guardar paciente'}</button>
+      <button class="btn primary" data-save>${onSaved ? 'Guardar y continuar' : thenConsulta ? 'Guardar y abrir consulta' : 'Guardar paciente'}</button>
     </div>`);
   const upd = (k) => {
     if (k === 'fnac') d.fnacAprox = false;
@@ -605,7 +661,7 @@ function openPacienteForm({ id, prefill = {}, thenConsulta = false }) {
     if (err) { $('#perr', sh).textContent = err; return; }
     if (orig) Object.assign(orig, d); else S.patients.push(d);
     save(); closeSheet(); toast(orig ? 'Paciente actualizado' : 'Paciente registrado');
-    if (thenConsulta) openConsulta({ patientId: d.id }); else if (!orig) go('#/paciente/' + d.id); else render();
+    if (onSaved) onSaved(d.id); else if (thenConsulta) openConsulta({ patientId: d.id }); else if (!orig) go('#/paciente/' + d.id); else render();
   };
   $('[data-del]', sh) && ($('[data-del]', sh).onclick = async () => {
     const n = S.consultas.filter(c => c.patientId === d.id).length;
@@ -620,7 +676,7 @@ function openPacienteForm({ id, prefill = {}, thenConsulta = false }) {
 /* =========================================================================
    HOJA DE CONSULTA
    ========================================================================= */
-function openConsulta({ id, patientId }) {
+function openConsulta({ id, patientId, prefill = null }) {
   const orig = id ? S.consultas.find(c => c.id === id) : null;
   const p = pat(orig ? orig.patientId : patientId);
   if (!p) return toast('No se encontró el paciente');
@@ -630,6 +686,7 @@ function openConsulta({ id, patientId }) {
     nota: '', sv: {}, exploracion: '', dxIssste: '', suive: null, lab: false, img: false, meds: 0, plan: '',
     foraneo: !!p.foraneo, procedencia: p.procedencia || '', incapacidad: false, incapDias: 0, createdAt: new Date().toISOString()
   };
+  if (!orig && prefill) Object.assign(d, prefill);
   const sh = openSheet(`
     <div class="shead"><span class="avatar ${p.sexo === 'F' ? 'f' : 'm'}">${esc(initials(p.nombre))}</span>
       <div style="flex:1;min-width:0"><h2 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.nombre)}</h2>
@@ -646,7 +703,7 @@ function openConsulta({ id, patientId }) {
       <div class="section"><h3>Exploración física</h3><button type="button" class="btn soft" data-normal>Usar exploración normal</button></div>
       <div class="f"><textarea data-b="exploracion" aria-label="Exploración física" placeholder="Hallazgos de la exploración"></textarea></div>
       <div class="section"><h3>Diagnósticos</h3></div>
-      <div class="f s6"><label for="dx1">Diagnóstico ISSSTE</label><div class="combo" id="dxwrap"><input id="dx1" type="text" data-b="dxIssste" autocomplete="off" placeholder="Escribe el diagnóstico"></div></div>
+      <div class="f s6"><label for="dx1">${dxLbl()}</label><div class="combo" id="dxwrap"><input id="dx1" type="text" data-b="dxIssste" autocomplete="off" placeholder="Escribe el diagnóstico"></div></div>
       <div class="f s6"><span class="lbl">Diagnóstico SUIVE (epidemiología)</span><div id="suivebox"></div></div>
       <div class="section"><h3>Estudios y medicamentos</h3></div>
       <div class="f s4">${toggle('lab', 'Laboratorio', 'Se solicitaron estudios')}</div>
@@ -659,6 +716,7 @@ function openConsulta({ id, patientId }) {
       <div class="f s6">${toggle('incapacidad', 'Incapacidad', 'Se otorgó licencia médica en esta consulta')}
         <div id="incWrap" class="${d.incapacidad ? '' : 'hide'}" style="margin-top:10px"><span class="lbl">Días de incapacidad</span><div style="margin-top:6px">${stepper('incapDias')}</div></div></div>
       <div class="f"><label for="cp">Plan e indicaciones (opcional)</label><textarea id="cp" data-b="plan" style="min-height:70px"></textarea></div>
+      ${d.vivo ? `<div class="f"><div class="row wrap"><span class="tag o">Consulta en vivo</span><button type="button" class="btn soft" data-receta>${IC.word} ${AMB === 'particular' ? 'Receta en Word' : 'Lista de apoyo de medicamentos'}</button></div></div>` : ''}
     </div>
     <div class="sticky-actions">
       ${orig ? `<button class="btn danger" data-del style="margin-right:auto">${IC.trash} Eliminar</button>` : ''}
@@ -681,6 +739,7 @@ function openConsulta({ id, patientId }) {
     t.value = S.settings.exploracionNormal.replace(/@/g, p.sexo === 'F' ? 'a' : 'o'); d.exploracion = t.value; t.focus();
   };
   $$('[data-close]', sh).forEach(b => b.onclick = closeSheet);
+  $('[data-receta]', sh) && ($('[data-receta]', sh).onclick = () => Vivo.recetaDeConsulta(d, p));
   $('[data-save]', sh).onclick = () => {
     if (!d.fecha) return toast('Falta la fecha de la consulta');
     d.procedencia = (d.procedencia || '').trim();
@@ -691,6 +750,7 @@ function openConsulta({ id, patientId }) {
     p.foraneo = d.foraneo; p.procedencia = d.procedencia;   // se recuerda para su siguiente consulta
     d.dxIssste = (d.dxIssste || '').trim();
     d.cronico = cronActivo(p) ? { enfermedades: p.cronico.enfermedades.map(e => `${e.nombre} (${evolTxt(e)})`), medicamentos: [...p.cronico.medicamentos] } : null;
+    if (!orig && d.vivo) Vivo.aplicarAntecedentes(p, d.vivo.h);
     if (orig) Object.assign(orig, d); else S.consultas.push(d);
     save(); closeSheet(); toast('Consulta guardada'); render();
   };
@@ -736,7 +796,7 @@ function viewPaciente({ a: id, b: tab = 'consultas' }) {
       <div class="tl"><div class="card milk" data-c="${c.id}" tabindex="0">
         <div class="row between wrap"><span class="when">${cap(fmtLong(c.fecha))} · ${esc(c.hora)}</span>
           <div class="tags"><span class="tag">${c.tipo === 'primera' ? 'Primera vez' : 'Subsecuente'}</span>${c.foraneo ? `<span class="tag">Foráneo · ${esc(c.procedencia)}</span>` : ''}${c.incapacidad ? `<span class="tag o">Incapacidad ${c.incapDias} día(s)</span>` : ''}${c.lab ? '<span class="tag o">Laboratorio</span>' : ''}${c.img ? '<span class="tag o">Imagen</span>' : ''}<span class="tag">${c.meds || 0} medicamento(s)</span></div></div>
-        <div style="margin-top:8px"><b>${esc(c.dxIssste || 'Sin diagnóstico ISSSTE')}</b>${s ? ` <span class="small muted">· SUIVE ${esc(s.clave)} ${esc(s.nombre)}</span>` : ''}</div>
+        <div style="margin-top:8px"><b>${esc(c.dxIssste || (AMB === 'particular' ? 'Sin diagnóstico' : 'Sin diagnóstico ISSSTE'))}</b>${s ? ` <span class="small muted">· SUIVE ${esc(s.clave)} ${esc(s.nombre)}</span>` : ''}</div>
         ${c.nota ? `<div class="txt">${esc(c.nota)}</div>` : ''}
         ${c.cronico?.medicamentos?.length ? `<div class="small muted" style="margin-bottom:4px">Tratamiento crónico en esa consulta: ${esc(c.cronico.medicamentos.join(', '))}</div>` : ''}
         ${c.sv && (c.sv.ta || c.sv.fc) ? `<div class="small muted">${[c.sv.ta && 'TA ' + c.sv.ta, c.sv.fc && 'FC ' + c.sv.fc, c.sv.fr && 'FR ' + c.sv.fr, c.sv.temp && 'T ' + c.sv.temp + '°', c.sv.sat && 'Sat ' + c.sv.sat + '%'].filter(Boolean).join(' · ')}</div>` : ''}
@@ -1068,8 +1128,19 @@ function viewReportes() {
    ========================================================================= */
 function viewAjustes() {
   const st = S.settings;
-  view().innerHTML = vhead('Ajustes', 'Datos que se prellenan, catálogo SUIVE, seguridad y respaldos') + `
+  view().innerHTML = vhead('Ajustes', `Consultorio: ${esc(AMBITOS[AMB].nombre)} · datos que se prellenan, seguridad y respaldos`) + `
   <div class="stack">
+  ${Vivo.ajustesHTML()}
+  ${AMB === 'particular' ? `<section class="card milk"><h2 style="margin-bottom:6px">Receta médica (plantilla)</h2><p class="hint" style="margin-bottom:14px">Datos fijos del encabezado de la receta en Word. La fecha, el paciente, el diagnóstico, el peso y la talla se llenan solos en cada consulta.</p>
+    <div class="form">
+      <div class="f s6"><label>Nombre de la médica</label><input type="text" data-b="medico"></div>
+      <div class="f s6"><label>Título</label><input type="text" data-b="recTitulo"></div>
+      <div class="f s6"><label>Universidad</label><input type="text" data-b="recUniversidad"></div>
+      <div class="f s6"><label>Cédula profesional</label><input type="text" data-b="cedula"></div>
+      <div class="f s8"><label>Dirección del consultorio</label><input type="text" data-b="recDireccion"></div>
+      <div class="f s4"><label>Teléfono</label><input type="text" data-b="recTelefono" inputmode="tel"></div>
+    </div></section>` : ''}
+
   <section class="card milk"><h2 style="margin-bottom:6px">Datos para la solicitud de referencia</h2><p class="hint" style="margin-bottom:14px">Se copian a cada solicitud nueva. Puedes cambiarlos en cada solicitud sin afectar estos.</p>
     <div class="form">
       <div class="f s6"><label>Nombre para el saludo de «Hoy»</label><input type="text" data-b="saludo" placeholder="Dra. Nancy"></div>
@@ -1116,6 +1187,7 @@ function viewAjustes() {
     <p class="hint" id="persist" style="margin-top:10px"></p></section>
   </div>`;
   bindForm(view(), st, () => save());
+  Vivo.ajustesBind();
   $('#logo').onchange = e => {
     const f = e.target.files[0]; e.target.value = ''; if (!f) return;
     const rd = new FileReader();
@@ -1130,7 +1202,7 @@ function viewAjustes() {
   $('#restore').onchange = e => { const f = e.target.files[0]; e.target.value = ''; importarArchivo(f); };
   $('#impP2').onchange = e => { const f = e.target.files[0]; e.target.value = ''; importarArchivo(f); };
   $('#pinSet').onclick = setPin;
-  $('#pinOff') && ($('#pinOff').onclick = async () => { if (await confirmBox('La app ya no pedirá PIN al abrirse.', { ok: 'Quitar PIN' })) { st.pinHash = ''; save(); viewAjustes(); toast('PIN quitado'); } });
+  $('#pinOff') && ($('#pinOff').onclick = async () => { if (await confirmBox('La app ya no pedirá PIN al abrirse.', { ok: 'Quitar PIN' })) { st.pinHash = ''; save(); syncPin(); viewAjustes(); toast('PIN quitado'); } });
   $('#lockNow') && ($('#lockNow').onclick = showLock);
   navigator.storage?.persisted?.().then(v => $('#persist') && ($('#persist').textContent = v ? 'El navegador marcó estos datos como persistentes.' : 'Consejo: instala la app en la pantalla de inicio para que Safari no borre los datos.'));
   const drawS = () => {
@@ -1511,9 +1583,9 @@ async function docxReferencia(r) {
 
 /* --------- respaldo --------- */
 async function exportBackup() {
-  S.settings.lastBackup = new Date().toISOString(); await save(true);
+  S.settings.lastBackup = new Date().toISOString(); S.ambito = AMB; await save(true);
   const blob = new Blob([JSON.stringify(S)], { type: 'application/json' });
-  await deliver(blob, `Respaldo_consultorio_${iso(new Date())}.json`);
+  await deliver(blob, `Respaldo_${AMB}_${iso(new Date())}.json`);
   render();
 }
 /* --------- importar: un solo flujo que reconoce el tipo de archivo --------- */
@@ -1548,7 +1620,7 @@ async function aplicarPacientes(data) {
     const ex = S.patients.find(p => norm(p.nombre) === norm(x.nombre) && (!p.expediente || !x.expediente || base(p.expediente) === base(x.expediente)));
     ex ? completados++ : nuevos++; return [x, ex];
   });
-  if (!await confirmBox(`Es un archivo de pacientes. Se agregarán ${nuevos} pacientes nuevos y se completarán ${completados} que ya existen. No se borra nada.`, { ok: 'Importar', title: 'Importar pacientes' })) return;
+  if (!await confirmBox(`Es un archivo de pacientes para «${AMBITOS[AMB].nombre}». Se agregarán ${nuevos} pacientes nuevos y se completarán ${completados} que ya existen. No se borra nada.`, { ok: 'Importar', title: 'Importar pacientes' })) return;
   plan.forEach(([x, ex]) => {
     const tipo = (x.tipo === '' || x.tipo === null || x.tipo === undefined) ? '' : Number(x.tipo);
     if (ex) {
@@ -1570,8 +1642,9 @@ async function aplicarPacientes(data) {
   await save(true); toast(`Listo: ${nuevos} nuevos, ${completados} completados`); soloRevisar = false; go('#/pacientes');
 }
 async function aplicarRespaldo(data) {
-  if (!await confirmBox(`Es un respaldo completo con ${data.patients.length} pacientes y ${data.consultas.length} consultas. Reemplazará todo lo que hay ahora en este iPad.`, { ok: 'Restaurar', danger: true, title: 'Restaurar respaldo' })) return;
-  S = migrate(data); await save(true); toast('Respaldo restaurado'); go('#/hoy');
+  const otro = data.ambito && data.ambito !== AMB && AMBITOS[data.ambito];
+  if (!await confirmBox(`${otro ? `OJO: este respaldo es de «${otro.nombre}» y ahora estás en «${AMBITOS[AMB].nombre}». ` : ''}Es un respaldo completo con ${data.patients.length} pacientes y ${data.consultas.length} consultas. Reemplazará todo lo que hay ahora en «${AMBITOS[AMB].nombre}» en este iPad.`, { ok: 'Restaurar', danger: true, title: 'Restaurar respaldo' })) return;
+  S = migrate(data); S.ambito = AMB; await save(true); syncPin(); toast('Respaldo restaurado'); go('#/hoy');
 }
 
 /* =========================================================================
@@ -1612,7 +1685,7 @@ function setPin() {
   pinPad('Nuevo PIN', 'Escribe 4 dígitos', async v => {
     if (!first) { first = v; $('#lsub').textContent = 'Confírmalo'; return 'next'; }
     if (v !== first) { first = ''; $('#lsub').textContent = 'No coincidió, empieza de nuevo'; return false; }
-    S.settings.pinHash = await hashPin(v); save(); clearLock(); toast('PIN guardado'); render(); return true;
+    S.settings.pinHash = await hashPin(v); save(); syncPin(); clearLock(); toast('PIN guardado'); render(); return true;
   });
 }
 
@@ -1634,8 +1707,10 @@ document.addEventListener('visibilitychange', () => {
 });
 
 (async function init() {
-  try { S = await Store.get('db'); } catch (e) { console.error(e); }
+  try { const a = await Store.get('ambito'); if (AMBITOS[a]) AMB = a; } catch (e) { console.error(e); }
+  try { S = await Store.get(AMBITOS[AMB].key); } catch (e) { console.error(e); }
   S = migrate(S || defaults());
+  S.ambito = AMB;
   await save(true);
   navigator.storage?.persist?.();
   if (S.settings.pinHash) showLock();
